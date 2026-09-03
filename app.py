@@ -54,6 +54,8 @@ keywords의 angle 값은 반드시 다음 6개 중 하나만 사용하세요: "�
 
 metaKeywords의 angle 값은 반드시 다음 3개 중 하나만 사용하세요: "업종", "프로모션 유형", "브랜드 톤". 각 관점마다 최소 1개씩, 총 4~6개를 만드세요. 시각 키워드(색감, 무드 등)는 넣지 마세요.
 
+metaKeywords는 실제 광고 카피에 흔히 그대로 들어갈 법한 짧고 일반적인 단어/문구(1~3단어)로 만드세요. "럭셔리 세럼 제형 연출"처럼 창작적이고 긴 묘사형 문구는 실제 광고 텍스트와 일치하지 않아 검색 결과가 거의 안 나옵니다. 대신 "수분 세럼", "신제품 할인", "무료배송" 처럼 업종명, 제품 카테고리명, 흔한 프로모션 문구 자체를 쓰세요.
+
 모든 키워드(label)는 반드시 한국어로만 작성하세요. 영어 단어를 섞지 마세요. 검색창에 넣었을 때 자연스러운 길이(2~5단어)로 만드세요.
 
 이미지가 없고 텍스트 설명만 주어진 경우에도, 그 텍스트를 근거로 같은 방식으로 추론해서 동일한 JSON 형식으로 응답하세요."""
@@ -78,7 +80,7 @@ def friendly_error(e: Exception) -> str:
 
 def meta_url(label: str) -> str:
     return (
-        "https://www.facebook.com/ads/library/?active_status=active&ad_type=all"
+        "https://www.facebook.com/ads/library/?active_status=all&ad_type=all"
         f"&country=ALL&media_type=all&search_type=keyword_unordered&q={quote(label)}"
     )
 
