@@ -183,13 +183,6 @@ h1, h2, h3 { color:var(--ink); }
   margin:16px 0 8px; padding-left:2px;
 }
 .angle-heading.meta{ color:var(--meta); }
-.kw-card{
-  display:flex; justify-content:space-between; align-items:center; gap:10px;
-  background:#fff; border:1px solid var(--line); border-left:4px solid var(--pin);
-  border-radius:10px; padding:11px 14px; margin-bottom:8px; text-decoration:none; color:var(--ink) !important;
-}
-.kw-card.meta{ border-left-color:var(--meta); }
-.kw-card .label{ font-weight:700; font-size:14px; }
 .attr-box{
   background:#fff; border:1px solid var(--line); border-radius:9px; padding:10px 12px; margin-bottom:8px;
 }
@@ -255,20 +248,12 @@ if result:
     for angle, kws in group_by_angle(result.get("keywords", []), PIN_ANGLE_ORDER).items():
         st.markdown(f'<div class="angle-heading">{angle}</div>', unsafe_allow_html=True)
         for kw in kws:
-            st.markdown(
-                f'<a class="kw-card" href="{pin_url(kw["label"])}" target="_blank">'
-                f'<div class="label">{kw["label"]}</div><div>↗</div></a>',
-                unsafe_allow_html=True,
-            )
+            st.link_button(kw["label"], pin_url(kw["label"]), icon="↗", use_container_width=True)
 
     st.markdown("### 📘 메타 라이브러리 검색 키워드")
     for angle, kws in group_by_angle(result.get("metaKeywords", []), META_ANGLE_ORDER).items():
         st.markdown(f'<div class="angle-heading meta">{angle}</div>', unsafe_allow_html=True)
         for kw in kws:
-            st.markdown(
-                f'<a class="kw-card meta" href="{meta_url(kw["label"])}" target="_blank">'
-                f'<div class="label">{kw["label"]}</div><div>↗</div></a>',
-                unsafe_allow_html=True,
-            )
+            st.link_button(kw["label"], meta_url(kw["label"]), icon="↗", use_container_width=True)
 
     st.caption("핀터레스트/메타 라이브러리 모두 자동 크롤링·이미지 자동 수집은 이용약관상 금지되어 있습니다. 위 링크로 검색 결과를 열어 실제 이미지 확인/저장은 직접 진행해 주세요.")
