@@ -43,16 +43,18 @@ SYSTEM_PROMPT = """당신은 광고/디자인 크리에이티브 디렉터입니
     "copyStyle": "카피/타이포그래피 스타일 설명 (텍스트가 있는 경우, 없으면 빈 문자열)"
   },
   "keywords": [
-    {"label": "키워드(한국어 또는 영어, 검색에 최적화된 형태)", "angle": "이 키워드가 어떤 관점을 겨냥하는지 5-10자 라벨 (예: 색감, 레이아웃, 업종, 무드, 카피톤)"}
+    {"label": "한국어 검색 키워드 (2~5단어)", "angle": "색감"}
   ],
   "metaKeywords": [
-    {"label": "메타 라이브러리 검색에 적합한 텍스트 키워드", "angle": "이 키워드가 겨냥하는 관점 5-10자 라벨 (예: 업종, 제품군, 프로모션 유형, 브랜드 톤)"}
+    {"label": "한국어 검색 키워드 (2~5단어)", "angle": "업종"}
   ]
 }
 
-keywords는 반드시 6~8개를 만들고, 다음 관점을 최소 하나씩 포함하세요: (1) 색감/팔레트, (2) 레이아웃/구도, (3) 업종/카테고리, (4) 무드/감성, (5) 카피/타이포 스타일, (6) 더 넓은 카테고리 키워드 1개, (7) 더 좁고 구체적인 키워드 1개. 한국어와 영어 키워드를 섞어서 만드세요. 검색창에 넣었을 때 자연스러운 길이(2~5단어)로 만드세요.
+keywords의 angle 값은 반드시 다음 6개 중 하나만 사용하세요: "색감", "레이아웃", "업종", "무드", "카피 스타일", "구체적 키워드". 각 관점마다 최소 1개씩, 총 6~8개를 만드세요.
 
-metaKeywords는 4~6개를 만들고, 업종/제품군, 프로모션 유형, 브랜드 톤 관점을 최소 하나씩 포함하세요. 시각 키워드(색감, 무드 등)는 넣지 마세요.
+metaKeywords의 angle 값은 반드시 다음 3개 중 하나만 사용하세요: "업종", "프로모션 유형", "브랜드 톤". 각 관점마다 최소 1개씩, 총 4~6개를 만드세요. 시각 키워드(색감, 무드 등)는 넣지 마세요.
+
+모든 키워드(label)는 반드시 한국어로만 작성하세요. 영어 단어를 섞지 마세요. 검색창에 넣었을 때 자연스러운 길이(2~5단어)로 만드세요.
 
 이미지가 없고 텍스트 설명만 주어진 경우에도, 그 텍스트를 근거로 같은 방식으로 추론해서 동일한 JSON 형식으로 응답하세요."""
 
@@ -97,16 +99,36 @@ def get_client() -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
+_ANGLE_STOPWORDS = {
+    "색감", "팔레트", "레이아웃", "구도", "업종", "카테고리", "무드", "감성",
+    "카피", "타이포", "카피톤", "카피 스타일", "프로모션", "유형", "브랜드",
+    "브랜드 톤", "제품군", "넓은 카테고리", "구체적", "구체적 키워드",
+}
+
+PIN_ANGLE_ORDER = ["색감", "레이아웃", "업종", "무드", "카피 스타일", "구체적 키워드"]
+META_ANGLE_ORDER = ["업종", "프로모션 유형", "브랜드 톤"]
+
+
+def group_by_angle(items: list, angle_order: list) -> dict:
+    groups: dict[str, list] = {angle: [] for angle in angle_order}
+    for kw in items:
+        groups.setdefault(kw["angle"], []).append(kw)
+    return {angle: kws for angle, kws in groups.items() if kws}
+
+
 def clean_keyword_list(items: list) -> list:
-    """모델이 가끔 라벨 없이 조각난 항목(빈 문자열, 한 글자짜리 자모 등)을 섞어 보낼 때 걸러낸다."""
+    """모델이 가끔 하나의 키워드를 label/angle이 따로따로인 조각난 항목(빈 문자열,
+    "색감"처럼 관점 단어 자체가 label로 들어온 항목, 한 글자짜리 자모 등)으로
+    쪼개서 보낼 때 걸러낸다. label과 angle이 둘 다 정상적으로 채워진 것만 남긴다."""
     cleaned = []
     for kw in items or []:
         if not isinstance(kw, dict):
             continue
         label = (kw.get("label") or "").strip()
-        if len(label) < 2:
+        angle = (kw.get("angle") or "").strip()
+        if len(label) < 2 or not angle or label in _ANGLE_STOPWORDS:
             continue
-        cleaned.append({"label": label, "angle": (kw.get("angle") or "").strip()})
+        cleaned.append({"label": label, "angle": angle})
     return cleaned
 
 
@@ -156,6 +178,11 @@ h1, h2, h3 { color:var(--ink); }
   font-weight:700; font-size:12px; letter-spacing:.14em; text-transform:uppercase;
   color:var(--brand); margin-bottom:2px;
 }
+.angle-heading{
+  font-weight:700; font-size:13px; color:var(--pin);
+  margin:16px 0 8px; padding-left:2px;
+}
+.angle-heading.meta{ color:var(--meta); }
 .kw-card{
   display:flex; justify-content:space-between; align-items:center; gap:10px;
   background:#fff; border:1px solid var(--line); border-left:4px solid var(--pin);
@@ -163,7 +190,6 @@ h1, h2, h3 { color:var(--ink); }
 }
 .kw-card.meta{ border-left-color:var(--meta); }
 .kw-card .label{ font-weight:700; font-size:14px; }
-.kw-card .angle{ font-size:11px; color:var(--ink-dim); }
 .attr-box{
   background:#fff; border:1px solid var(--line); border-radius:9px; padding:10px 12px; margin-bottom:8px;
 }
@@ -226,25 +252,23 @@ if result:
         )
 
     st.markdown("### 📌 핀터레스트 검색 키워드")
-    for kw in result.get("keywords", []):
-        label = kw.get("label", "")
-        angle = kw.get("angle", "")
-        st.markdown(
-            f'<a class="kw-card" href="{pin_url(label)}" target="_blank">'
-            f'<div><div class="label">{label}</div><div class="angle">{angle}</div></div>'
-            f'<div>↗</div></a>',
-            unsafe_allow_html=True,
-        )
+    for angle, kws in group_by_angle(result.get("keywords", []), PIN_ANGLE_ORDER).items():
+        st.markdown(f'<div class="angle-heading">{angle}</div>', unsafe_allow_html=True)
+        for kw in kws:
+            st.markdown(
+                f'<a class="kw-card" href="{pin_url(kw["label"])}" target="_blank">'
+                f'<div class="label">{kw["label"]}</div><div>↗</div></a>',
+                unsafe_allow_html=True,
+            )
 
     st.markdown("### 📘 메타 라이브러리 검색 키워드")
-    for kw in result.get("metaKeywords", []):
-        label = kw.get("label", "")
-        angle = kw.get("angle", "")
-        st.markdown(
-            f'<a class="kw-card meta" href="{meta_url(label)}" target="_blank">'
-            f'<div><div class="label">{label}</div><div class="angle">{angle}</div></div>'
-            f'<div>↗</div></a>',
-            unsafe_allow_html=True,
-        )
+    for angle, kws in group_by_angle(result.get("metaKeywords", []), META_ANGLE_ORDER).items():
+        st.markdown(f'<div class="angle-heading meta">{angle}</div>', unsafe_allow_html=True)
+        for kw in kws:
+            st.markdown(
+                f'<a class="kw-card meta" href="{meta_url(kw["label"])}" target="_blank">'
+                f'<div class="label">{kw["label"]}</div><div>↗</div></a>',
+                unsafe_allow_html=True,
+            )
 
     st.caption("핀터레스트/메타 라이브러리 모두 자동 크롤링·이미지 자동 수집은 이용약관상 금지되어 있습니다. 위 링크로 검색 결과를 열어 실제 이미지 확인/저장은 직접 진행해 주세요.")
