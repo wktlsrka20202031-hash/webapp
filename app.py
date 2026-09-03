@@ -25,7 +25,7 @@ import streamlit as st
 from google import genai
 from google.genai import types
 
-MODEL = "gemini-3.6-flash"
+MODEL_FALLBACKS = ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.7-flash"]
 
 SYSTEM_PROMPT = """당신은 광고/디자인 크리에이티브 디렉터입니다. 마케터가 올린 레퍼런스(이미지 또는 텍스트 설명)를 분석해서, (1) 핀터레스트에서 비슷한 스타일의 레퍼런스를 찾을 검색 키워드와 (2) 메타 광고 라이브러리(Meta Ad Library)에서 비슷한 업종/형태의 실제 집행 광고 소재를 찾을 검색 키워드를 각각 만들어야 합니다.
 
@@ -107,15 +107,21 @@ def analyze(image_bytes: bytes | None, mime_type: str | None, text_desc: str | N
     else:
         parts.append(types.Part.from_text(text=f"다음 텍스트 설명을 분석해서 지정된 JSON 형식으로 응답해주세요:\n\n{text_desc}"))
 
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=parts,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            response_mime_type="application/json",
-        ),
+    config = types.GenerateContentConfig(
+        system_instruction=SYSTEM_PROMPT,
+        response_mime_type="application/json",
     )
-    return json.loads(response.text)
+
+    last_error: Exception | None = None
+    for model in MODEL_FALLBACKS:
+        try:
+            response = client.models.generate_content(model=model, contents=parts, config=config)
+            return json.loads(response.text)
+        except Exception as e:
+            last_error = e
+            if "UNAVAILABLE" not in str(e) and "503" not in str(e):
+                raise
+    raise last_error
 
 
 # ---------------------------------------------------------------- UI ----
