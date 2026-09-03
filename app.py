@@ -67,6 +67,8 @@ def friendly_error(e: Exception) -> str:
         return "API 키가 올바르지 않아요. Streamlit Secrets에 등록한 GEMINI_API_KEY 값을 다시 확인해주세요."
     if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
         return "요청이 너무 많아요 (무료 한도 초과). 잠시 후 다시 시도해주세요."
+    if "UNAVAILABLE" in msg or "503" in msg:
+        return "지금 Gemini 서버에 요청이 몰려서 잠깐 응답을 못 받았어요. 30초~1분 후 다시 시도해주세요."
     if "JSONDecodeError" in e.__class__.__name__:
         return "결과를 제대로 받지 못했어요. 다시 시도해주세요."
     return f"분석 중 문제가 발생했어요: {msg}"
