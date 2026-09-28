@@ -54,9 +54,9 @@ keywords의 angle 값은 반드시 다음 6개 중 하나만 사용하세요: "�
 
 metaKeywords의 angle 값은 반드시 다음 3개 중 하나만 사용하세요: "업종", "프로모션 유형", "브랜드 톤". 각 관점마다 최소 1개씩, 총 4~6개를 만드세요. 시각 키워드(색감, 무드 등)는 넣지 마세요.
 
-metaKeywords는 실제 광고 카피에 흔히 그대로 들어갈 법한 짧고 일반적인 단어/문구(1~3단어)로 만드세요. "럭셔리 세럼 제형 연출"처럼 창작적이고 긴 묘사형 문구는 실제 광고 텍스트와 일치하지 않아 검색 결과가 거의 안 나옵니다. 대신 "수분 세럼", "신제품 할인", "무료배송" 처럼 업종명, 제품 카테고리명, 흔한 프로모션 문구 자체를 쓰세요.
+metaKeywords는 반드시 1~2단어의 명사로만 만드세요. 메타 라이브러리는 검색어의 모든 단어가 광고 문구에 들어 있어야 결과가 나오기 때문에, "신뢰감 있는", "프리미엄", "고급스러운", "감성적인" 같은 꾸밈말이 하나라도 붙으면 결과가 0개가 됩니다. "법률 상담", "수분 세럼", "신제품 할인", "무료배송", "이혼 전문"처럼 실제 광고 카피에 그대로 쓰이는 업종명·제품명·프로모션 문구만 쓰세요. 브랜드 톤 관점도 형용사 대신 그 톤의 광고에 실제로 자주 나오는 단어(예: 신뢰 → "무료 상담", "전문 변호사")로 표현하세요.
 
-모든 키워드(label)는 반드시 한국어로만 작성하세요. 영어 단어를 섞지 마세요. 검색창에 넣었을 때 자연스러운 길이(2~5단어)로 만드세요.
+모든 키워드(label)는 반드시 한국어로만 작성하세요. 영어 단어를 섞지 마세요. keywords(핀터레스트)는 검색창에 넣었을 때 자연스러운 길이(2~4단어)로 만드세요.
 
 이미지가 없고 텍스트 설명만 주어진 경우에도, 그 텍스트를 근거로 같은 방식으로 추론해서 동일한 JSON 형식으로 응답하세요."""
 
@@ -76,6 +76,14 @@ def friendly_error(e: Exception) -> str:
     if "JSONDecodeError" in e.__class__.__name__:
         return "결과를 제대로 받지 못했어요. 다시 시도해주세요."
     return f"분석 중 문제가 발생했어요: {msg}"
+
+
+def shorten_meta_label(label: str) -> str:
+    """메타 라이브러리는 모든 단어가 광고 문구에 있어야 검색된다.
+    모델이 3단어 이상으로 길게 만들면 꾸밈말은 버리고 뒤쪽 2단어(한국어에서
+    핵심 명사가 오는 자리)만 남긴다. 예: "신뢰감 있는 법률 상담" → "법률 상담"."""
+    words = label.split()
+    return " ".join(words[-2:]) if len(words) > 2 else label
 
 
 def meta_url(label: str) -> str:
@@ -158,7 +166,14 @@ def analyze(image_bytes: bytes | None, mime_type: str | None, text_desc: str | N
             response = client.models.generate_content(model=model, contents=parts, config=config)
             data = json.loads(response.text)
             data["keywords"] = clean_keyword_list(data.get("keywords"))
-            data["metaKeywords"] = clean_keyword_list(data.get("metaKeywords"))
+            meta = clean_keyword_list(data.get("metaKeywords"))
+            seen = set()
+            data["metaKeywords"] = []
+            for kw in meta:
+                kw["label"] = shorten_meta_label(kw["label"])
+                if kw["label"] not in seen:
+                    seen.add(kw["label"])
+                    data["metaKeywords"].append(kw)
             return data
         except Exception as e:
             last_error = e
