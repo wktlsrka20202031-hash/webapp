@@ -48,7 +48,7 @@ SYSTEM_PROMPT = """당신은 광고/디자인 크리에이티브 디렉터입니
     {"label": "한국어 검색 키워드 (2~5단어)", "angle": "색감"}
   ],
   "metaKeywords": [
-    {"label": "한국어 검색 키워드 (2~5단어)", "angle": "업종"}
+    {"label": "한국어 검색 키워드 (1~2단어)", "angle": "업종", "core": "label 안에서 가장 핵심인 명사 한 단어"}
   ]
 }
 
@@ -59,6 +59,8 @@ keywords는 반드시 "광고 소재" 레퍼런스가 검색되도록, 모든 �
 metaKeywords의 angle 값은 반드시 다음 3개 중 하나만 사용하세요: "업종", "프로모션 유형", "브랜드 톤". 각 관점마다 최소 1개씩, 총 4~6개를 만드세요. 시각 키워드(색감, 무드 등)는 넣지 마세요.
 
 metaKeywords는 반드시 1~2단어의 명사로만 만드세요. 메타 라이브러리는 검색어의 모든 단어가 광고 문구에 들어 있어야 결과가 나오기 때문에, "신뢰감 있는", "프리미엄", "고급스러운", "감성적인" 같은 꾸밈말이 하나라도 붙으면 결과가 0개가 됩니다. "법률 상담", "수분 세럼", "신제품 할인", "무료배송", "이혼 전문"처럼 실제 광고 카피에 그대로 쓰이는 업종명·제품명·프로모션 문구만 쓰세요. 브랜드 톤 관점도 형용사 대신 그 톤의 광고에 실제로 자주 나오는 단어(예: 신뢰 → "무료 상담", "전문 변호사")로 표현하세요.
+
+metaKeywords의 core에는 label을 이루는 단어 중 업종·제품을 가장 잘 나타내는 핵심 명사 하나를 그대로 적으세요. 단독으로 검색해도 다른 업종 광고가 섞이지 않는 단어여야 합니다. 예: "수분 충전" → "수분", "피부 진정" → "피부", "전문 변호사" → "변호사", "신제품 할인" → "신제품".
 
 모든 키워드(label)는 반드시 한국어로만 작성하세요. 영어 단어를 섞지 마세요. keywords(핀터레스트)는 광고 형식 단어를 포함해 검색창에 넣었을 때 자연스러운 길이(3~5단어)로 만드세요.
 
@@ -156,7 +158,11 @@ def clean_keyword_list(items: list) -> list:
         angle = (kw.get("angle") or "").strip()
         if len(label) < 2 or not angle or label in _ANGLE_STOPWORDS:
             continue
-        cleaned.append({"label": label, "angle": angle})
+        item = {"label": label, "angle": angle}
+        core = (kw.get("core") or "").strip()
+        if core:
+            item["core"] = core
+        cleaned.append(item)
     return cleaned
 
 
@@ -439,7 +445,9 @@ a.lt-chip-broad{
   padding:10px 12px; border-radius:var(--radius-pill); font-size:13px; font-weight:500;
   color:var(--ink-3) !important; text-decoration:none !important; border:1px dashed #D4D3CC; transition:all .15s;
 }
+a.lt-chip-broad b{ font-weight:700; color:var(--ink-2); }
 a.lt-chip-broad:hover{ color:var(--accent-hover) !important; border-color:var(--accent); border-style:solid; }
+a.lt-chip-broad:hover b{ color:var(--accent-hover); }
 
 /* 전체 복사 (st.code) */
 .st-key-copy_all [data-testid="stCode"] pre{ background:var(--card) !important; border-radius:var(--radius-md); box-shadow:var(--shadow); padding:20px 24px !important; }
@@ -590,19 +598,29 @@ def KeywordChip(label: str, url: str, angle: str, broad: tuple[str, str] | None 
     return (
         f'<span class="lt-chip-pair">{chip}'
         f'<a class="lt-chip-broad" href="{html.escape(broad_url)}" target="_blank" rel="noopener" '
-        f'title="결과가 없으면 \'{html.escape(word)}\' 한 단어로 넓게 검색">넓게 · {html.escape(word)}</a></span>'
+        f'title="검색 결과가 적으면 \'{html.escape(word)}\' 한 단어로만 다시 검색합니다">'
+        f'<b>{html.escape(word)}</b>만 검색 ↗</a></span>'
     )
 
 
+def core_word(kw: dict) -> str:
+    """핵심 단어: 모델이 고른 core가 label 안에 있으면 그것, 없으면 마지막 단어."""
+    words = kw["label"].split()
+    core = kw.get("core", "")
+    return core if core in words else words[-1]
+
+
 def SearchCTA(kind: str, title: str, desc: str, groups: dict, url_fn) -> str:
-    def broad_for(label: str):
+    def broad_for(kw: dict):
         # 메타는 모든 단어가 광고 문구에 있어야 검색되므로, 2단어 이상이면
-        # 핵심 명사(마지막 단어) 하나로 넓게 찾는 링크를 함께 제공
-        words = label.split()
-        return (words[-1], url_fn(words[-1])) if kind == "meta" and len(words) > 1 else None
+        # 핵심 명사 하나로 다시 찾는 링크를 함께 제공
+        if kind != "meta" or len(kw["label"].split()) < 2:
+            return None
+        word = core_word(kw)
+        return word, url_fn(word)
 
     chips = "".join(
-        KeywordChip(kw["label"], url_fn(kw["label"]), angle, broad_for(kw["label"]))
+        KeywordChip(kw["label"], url_fn(kw["label"]), angle, broad_for(kw))
         for angle, kws in groups.items() for kw in kws
     )
     badge = "P" if kind == "pin" else "M"
@@ -618,7 +636,7 @@ def SearchKeywords(result: dict) -> None:
     html_block(
         '<div class="lt-kw-grid">'
         + SearchCTA("pin", "Pinterest에서 검색", "색감·레이아웃·무드 같은 시각 스타일 기준 검색어입니다. 누르면 새 탭에서 검색 결과가 열립니다.", pin_groups, pin_url)
-        + SearchCTA("meta", "Meta 광고 라이브러리에서 검색", "실제 광고 문구에 쓰이는 업종·프로모션 단어입니다. 국내 집행 광고 기준이며, 결과가 없으면 옆의 '넓게' 버튼으로 핵심 단어만 검색하세요.", meta_groups, meta_url)
+        + SearchCTA("meta", "Meta 광고 라이브러리에서 검색", "실제 광고 문구에 쓰이는 업종·프로모션 단어입니다. 국내 집행 광고 기준입니다. 결과가 적으면 옆의 'OO만 검색'을 눌러 핵심 단어 하나로 다시 찾아보세요.", meta_groups, meta_url)
         + "</div>"
     )
     all_labels = [kw["label"] for kw in result.get("keywords", [])] + [kw["label"] for kw in result.get("metaKeywords", [])]
