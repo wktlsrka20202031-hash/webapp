@@ -20,6 +20,7 @@ Claude 채팅이 필요 없다. 광고 레퍼런스 이미지를 올리면 Googl
 
 import html
 import json
+import time
 from urllib.parse import quote
 
 import streamlit as st
@@ -73,7 +74,7 @@ def friendly_error(e: Exception) -> str:
     if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
         return "요청이 너무 많아요 (무료 한도 초과). 잠시 후 다시 시도해주세요."
     if "UNAVAILABLE" in msg or "503" in msg:
-        return "지금 Gemini 서버에 요청이 몰려서 잠깐 응답을 못 받았어요. 30초~1분 후 다시 시도해주세요."
+        return "Gemini 서버가 많이 붐벼서 자동으로 3번 다시 시도했지만 응답을 못 받았어요. 1~2분 뒤 다시 눌러주세요."
     if "JSONDecodeError" in e.__class__.__name__:
         return "결과를 제대로 받지 못했어요. 다시 시도해주세요."
     return f"분석 중 문제가 발생했어요: {msg}"
@@ -143,7 +144,15 @@ def clean_keyword_list(items: list) -> list:
     return cleaned
 
 
-def analyze(image_bytes: bytes | None, mime_type: str | None, text_desc: str | None) -> dict:
+RETRY_WAITS = [3, 6]  # 모든 모델이 붐빔(503)이면 이만큼(초) 쉬었다가 한 바퀴 더 시도
+
+
+def is_retryable(e: Exception) -> bool:
+    msg = str(e)
+    return "UNAVAILABLE" in msg or "503" in msg or isinstance(e, json.JSONDecodeError)
+
+
+def analyze(image_bytes: bytes | None, mime_type: str | None, text_desc: str | None, on_retry=None) -> dict:
     client = get_client()
 
     parts = []
@@ -162,24 +171,30 @@ def analyze(image_bytes: bytes | None, mime_type: str | None, text_desc: str | N
     )
 
     last_error: Exception | None = None
-    for model in MODEL_FALLBACKS:
-        try:
-            response = client.models.generate_content(model=model, contents=parts, config=config)
-            data = json.loads(response.text)
-            data["keywords"] = clean_keyword_list(data.get("keywords"))
-            meta = clean_keyword_list(data.get("metaKeywords"))
-            seen = set()
-            data["metaKeywords"] = []
-            for kw in meta:
-                kw["label"] = shorten_meta_label(kw["label"])
-                if kw["label"] not in seen:
-                    seen.add(kw["label"])
-                    data["metaKeywords"].append(kw)
-            return data
-        except Exception as e:
-            last_error = e
-            if "UNAVAILABLE" not in str(e) and "503" not in str(e):
-                raise
+    for round_no in range(len(RETRY_WAITS) + 1):
+        if round_no:
+            wait = RETRY_WAITS[round_no - 1]
+            if on_retry:
+                on_retry(round_no, wait)
+            time.sleep(wait)
+        for model in MODEL_FALLBACKS:
+            try:
+                response = client.models.generate_content(model=model, contents=parts, config=config)
+                data = json.loads(response.text)
+                data["keywords"] = clean_keyword_list(data.get("keywords"))
+                meta = clean_keyword_list(data.get("metaKeywords"))
+                seen = set()
+                data["metaKeywords"] = []
+                for kw in meta:
+                    kw["label"] = shorten_meta_label(kw["label"])
+                    if kw["label"] not in seen:
+                        seen.add(kw["label"])
+                        data["metaKeywords"].append(kw)
+                return data
+            except Exception as e:
+                last_error = e
+                if not is_retryable(e):
+                    raise
     raise last_error
 
 
@@ -498,10 +513,12 @@ def Stepper(current: int) -> None:
     html_block(f'<ol class="lt-steps">{"".join(items)}</ol>')
 
 
-def LoadingState(slot) -> None:
+def LoadingState(slot, retry_note: str = "") -> None:
+    note = f'<li class="active"><span class="dot"></span>{retry_note}</li>' if retry_note else ""
     slot.markdown(
         '<div class="lt-loading"><h3>레퍼런스를 분석하고 있어요</h3><ul>'
         '<li class="done"><span class="dot">✓</span>레퍼런스 확인</li>'
+        f'{note}'
         '<li class="active"><span class="dot"></span>디자인 요소 분석 · 검색 키워드 생성 중</li>'
         '<li><span class="dot"></span>결과 정리</li>'
         "</ul></div>",
@@ -592,8 +609,12 @@ def run_analysis(image_bytes, mime_type, text_desc) -> None:
     gap(16)
     slot = st.empty()
     LoadingState(slot)
+
+    def on_retry(round_no: int, wait: int) -> None:
+        LoadingState(slot, f"Gemini 서버가 붐벼서 {wait}초 뒤 다시 시도하는 중 ({round_no}/{len(RETRY_WAITS)})")
+
     try:
-        data = analyze(image_bytes, mime_type, text_desc)
+        data = analyze(image_bytes, mime_type, text_desc, on_retry=on_retry)
     except Exception as e:
         slot.empty()
         st.session_state["error"] = friendly_error(e)
