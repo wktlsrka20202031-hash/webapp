@@ -81,7 +81,7 @@ def friendly_error(e: Exception) -> str:
 def meta_url(label: str) -> str:
     return (
         "https://www.facebook.com/ads/library/?active_status=all&ad_type=all"
-        f"&country=ALL&media_type=all&search_type=keyword_unordered&q={quote(label)}"
+        f"&country=KR&media_type=all&search_type=keyword_unordered&q={quote(label)}"
     )
 
 
@@ -140,7 +140,10 @@ def analyze(image_bytes: bytes | None, mime_type: str | None, text_desc: str | N
     parts = []
     if image_bytes:
         parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type or "image/jpeg"))
-        parts.append(types.Part.from_text(text="이 이미지를 분석해서 지정된 JSON 형식으로 응답해주세요."))
+        prompt = "이 이미지를 분석해서 지정된 JSON 형식으로 응답해주세요."
+        if text_desc:
+            prompt += f"\n\n광고주 요청 문구도 함께 참고해서, 이미지와 요청이 겹치는 방향으로 키워드를 만들어주세요:\n{text_desc}"
+        parts.append(types.Part.from_text(text=prompt))
     else:
         parts.append(types.Part.from_text(text=f"다음 텍스트 설명을 분석해서 지정된 JSON 형식으로 응답해주세요:\n\n{text_desc}"))
 
@@ -200,18 +203,19 @@ st.write("광고 레퍼런스 이미지를 올리면 업종·색감·레이아�
 
 tab_image, tab_text = st.tabs(["이미지로 분석", "텍스트로 분석"])
 
-result = None
-uploaded_image_bytes = None
-
 with tab_image:
     file = st.file_uploader("레퍼런스 이미지 업로드", type=["jpg", "jpeg", "png", "webp"])
     if file:
-        uploaded_image_bytes = file.getvalue()
-        st.image(uploaded_image_bytes, use_container_width=True)
+        st.image(file.getvalue(), width="stretch")
+        extra = st.text_area(
+            "광고주 요청 문구 (선택)",
+            placeholder="예: 고급스럽고 신뢰감 있게, 20대 여성 타겟",
+            key="image_extra",
+        )
         if st.button("이미지 분석하기", type="primary", key="analyze_image"):
             with st.spinner("분석 중이에요..."):
                 try:
-                    result = analyze(uploaded_image_bytes, file.type, None)
+                    st.session_state["result"] = analyze(file.getvalue(), file.type, extra.strip() or None)
                 except Exception as e:
                     st.error(friendly_error(e))
 
@@ -223,9 +227,12 @@ with tab_text:
         else:
             with st.spinner("분석 중이에요..."):
                 try:
-                    result = analyze(None, None, desc)
+                    st.session_state["result"] = analyze(None, None, desc)
                 except Exception as e:
                     st.error(friendly_error(e))
+
+# 다른 입력을 건드려 화면이 새로 그려져도 마지막 분석 결과는 유지
+result = st.session_state.get("result")
 
 if result:
     st.divider()
@@ -250,12 +257,12 @@ if result:
     for angle, kws in group_by_angle(result.get("keywords", []), PIN_ANGLE_ORDER).items():
         st.markdown(f'<div class="angle-heading">{angle}</div>', unsafe_allow_html=True)
         for kw in kws:
-            st.link_button(kw["label"], pin_url(kw["label"]), icon="↗", use_container_width=True)
+            st.link_button(kw["label"], pin_url(kw["label"]), icon="↗", width="stretch")
 
     st.markdown("### 📘 메타 라이브러리 검색 키워드")
     for angle, kws in group_by_angle(result.get("metaKeywords", []), META_ANGLE_ORDER).items():
         st.markdown(f'<div class="angle-heading meta">{angle}</div>', unsafe_allow_html=True)
         for kw in kws:
-            st.link_button(kw["label"], meta_url(kw["label"]), icon="↗", use_container_width=True)
+            st.link_button(kw["label"], meta_url(kw["label"]), icon="↗", width="stretch")
 
     st.caption("핀터레스트/메타 라이브러리 모두 자동 크롤링·이미지 자동 수집은 이용약관상 금지되어 있습니다. 위 링크로 검색 결과를 열어 실제 이미지 확인/저장은 직접 진행해 주세요.")

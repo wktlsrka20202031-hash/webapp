@@ -1,0 +1,7 @@
+# 브라우저/OS가 다크 모드여도 항상 라이트 테마로 고정
+[theme]
+base = "light"
+backgroundColor = "#F1F0E9"           # --paper (아이보리 배경)
+secondaryBackgroundColor = "#FFFFFF"  # 입력칸/업로드 박스 배경
+textColor = "#191C1A"                 # --ink (제목·본문 글자색)
+primaryColor = "#1F5D4C"              # --brand (버튼·선택된 탭)
