@@ -416,6 +416,12 @@ a.lt-chip{
 a.lt-chip .arr{ color:var(--ink-3); font-size:13px; }
 a.lt-chip:hover{ background:var(--accent-soft); border-color:var(--accent); color:var(--accent-hover) !important; }
 a.lt-chip:hover .arr{ color:var(--accent); }
+.lt-chip-pair{ display:inline-flex; align-items:center; gap:4px; }
+a.lt-chip-broad{
+  padding:10px 12px; border-radius:var(--radius-pill); font-size:13px; font-weight:500;
+  color:var(--ink-3) !important; text-decoration:none !important; border:1px dashed #D4D3CC; transition:all .15s;
+}
+a.lt-chip-broad:hover{ color:var(--accent-hover) !important; border-color:var(--accent); border-style:solid; }
 
 /* 전체 복사 (st.code) */
 .st-key-copy_all [data-testid="stCode"] pre{ background:var(--card) !important; border-radius:var(--radius-md); box-shadow:var(--shadow); padding:20px 24px !important; }
@@ -555,16 +561,31 @@ def AnalysisResult(result: dict) -> None:
     )
 
 
-def KeywordChip(label: str, url: str, angle: str) -> str:
-    return (
+def KeywordChip(label: str, url: str, angle: str, broad: tuple[str, str] | None = None) -> str:
+    chip = (
         f'<a class="lt-chip" href="{html.escape(url)}" target="_blank" rel="noopener">'
         f'<span class="ang">{html.escape(angle)}</span>{html.escape(label)}<span class="arr">↗</span></a>'
+    )
+    if not broad:
+        return chip
+    word, broad_url = broad
+    return (
+        f'<span class="lt-chip-pair">{chip}'
+        f'<a class="lt-chip-broad" href="{html.escape(broad_url)}" target="_blank" rel="noopener" '
+        f'title="결과가 없으면 \'{html.escape(word)}\' 한 단어로 넓게 검색">넓게 · {html.escape(word)}</a></span>'
     )
 
 
 def SearchCTA(kind: str, title: str, desc: str, groups: dict, url_fn) -> str:
+    def broad_for(label: str):
+        # 메타는 모든 단어가 광고 문구에 있어야 검색되므로, 2단어 이상이면
+        # 핵심 명사(마지막 단어) 하나로 넓게 찾는 링크를 함께 제공
+        words = label.split()
+        return (words[-1], url_fn(words[-1])) if kind == "meta" and len(words) > 1 else None
+
     chips = "".join(
-        KeywordChip(kw["label"], url_fn(kw["label"]), angle) for angle, kws in groups.items() for kw in kws
+        KeywordChip(kw["label"], url_fn(kw["label"]), angle, broad_for(kw["label"]))
+        for angle, kws in groups.items() for kw in kws
     )
     badge = "P" if kind == "pin" else "M"
     return (
@@ -579,7 +600,7 @@ def SearchKeywords(result: dict) -> None:
     html_block(
         '<div class="lt-kw-grid">'
         + SearchCTA("pin", "Pinterest에서 검색", "색감·레이아웃·무드 같은 시각 스타일 기준 검색어입니다. 누르면 새 탭에서 검색 결과가 열립니다.", pin_groups, pin_url)
-        + SearchCTA("meta", "Meta 광고 라이브러리에서 검색", "실제 광고 문구에 쓰이는 업종·프로모션 단어입니다. 국내 집행 광고를 기준으로 검색합니다.", meta_groups, meta_url)
+        + SearchCTA("meta", "Meta 광고 라이브러리에서 검색", "실제 광고 문구에 쓰이는 업종·프로모션 단어입니다. 국내 집행 광고 기준이며, 결과가 없으면 옆의 '넓게' 버튼으로 핵심 단어만 검색하세요.", meta_groups, meta_url)
         + "</div>"
     )
     all_labels = [kw["label"] for kw in result.get("keywords", [])] + [kw["label"] for kw in result.get("metaKeywords", [])]
