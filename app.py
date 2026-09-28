@@ -54,13 +54,29 @@ SYSTEM_PROMPT = """당신은 광고/디자인 크리에이티브 디렉터입니
 
 keywords의 angle 값은 반드시 다음 6개 중 하나만 사용하세요: "색감", "레이아웃", "업종", "무드", "카피 스타일", "구체적 키워드". 각 관점마다 최소 1개씩, 총 6~8개를 만드세요.
 
+keywords는 반드시 "광고 소재" 레퍼런스가 검색되도록, 모든 키워드 끝에 "배너", "광고", "포스터", "상세페이지", "카드뉴스", "SNS 광고" 같은 광고 형식 단어를 하나 붙이세요. "네이비 골드 색감", "미니멀 무드"처럼 형식 단어가 없으면 핀터레스트가 컬러 팔레트·무드보드 같은 추상적인 이미지만 보여줍니다. 좋은 예: "네이비 골드 배너", "미니멀 화장품 광고", "좌측 인물 배치 배너", "명조체 헤드라인 포스터".
+
 metaKeywords의 angle 값은 반드시 다음 3개 중 하나만 사용하세요: "업종", "프로모션 유형", "브랜드 톤". 각 관점마다 최소 1개씩, 총 4~6개를 만드세요. 시각 키워드(색감, 무드 등)는 넣지 마세요.
 
 metaKeywords는 반드시 1~2단어의 명사로만 만드세요. 메타 라이브러리는 검색어의 모든 단어가 광고 문구에 들어 있어야 결과가 나오기 때문에, "신뢰감 있는", "프리미엄", "고급스러운", "감성적인" 같은 꾸밈말이 하나라도 붙으면 결과가 0개가 됩니다. "법률 상담", "수분 세럼", "신제품 할인", "무료배송", "이혼 전문"처럼 실제 광고 카피에 그대로 쓰이는 업종명·제품명·프로모션 문구만 쓰세요. 브랜드 톤 관점도 형용사 대신 그 톤의 광고에 실제로 자주 나오는 단어(예: 신뢰 → "무료 상담", "전문 변호사")로 표현하세요.
 
-모든 키워드(label)는 반드시 한국어로만 작성하세요. 영어 단어를 섞지 마세요. keywords(핀터레스트)는 검색창에 넣었을 때 자연스러운 길이(2~4단어)로 만드세요.
+모든 키워드(label)는 반드시 한국어로만 작성하세요. 영어 단어를 섞지 마세요. keywords(핀터레스트)는 광고 형식 단어를 포함해 검색창에 넣었을 때 자연스러운 길이(3~5단어)로 만드세요.
 
 이미지가 없고 텍스트 설명만 주어진 경우에도, 그 텍스트를 근거로 같은 방식으로 추론해서 동일한 JSON 형식으로 응답하세요."""
+
+
+AD_FORMAT_WORDS = ("광고", "배너", "포스터", "상세페이지", "카드뉴스", "전단", "브로슈어", "썸네일", "리플렛", "현수막")
+ABSTRACT_WORDS = {"색감", "무드", "느낌", "분위기", "감성", "스타일", "컬러", "팔레트", "톤", "톤앤매너", "디자인", "레이아웃", "구도"}
+
+
+def ensure_ad_format(label: str) -> str:
+    """핀터레스트는 형식 단어가 없으면 팔레트·무드보드 같은 추상 이미지를 보여준다.
+    모델이 빠뜨린 경우 "배너 광고"를 붙여 광고 소재가 검색되게 한다."""
+    if any(w in label for w in AD_FORMAT_WORDS):
+        return label
+    # "색감", "무드" 같은 추상어는 팔레트·무드보드를 끌어오므로 빼고 붙인다
+    words = [w for w in label.split() if w not in ABSTRACT_WORDS] or label.split()
+    return " ".join(words) + " 배너 광고"
 
 
 def pin_url(label: str) -> str:
@@ -181,7 +197,9 @@ def analyze(image_bytes: bytes | None, mime_type: str | None, text_desc: str | N
             try:
                 response = client.models.generate_content(model=model, contents=parts, config=config)
                 data = json.loads(response.text)
-                data["keywords"] = clean_keyword_list(data.get("keywords"))
+                data["keywords"] = [
+                    {**kw, "label": ensure_ad_format(kw["label"])} for kw in clean_keyword_list(data.get("keywords"))
+                ]
                 meta = clean_keyword_list(data.get("metaKeywords"))
                 seen = set()
                 data["metaKeywords"] = []
