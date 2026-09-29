@@ -531,10 +531,9 @@ def Header(active: str) -> None:
 def PageHeader() -> None:
     html_block(
         '<div class="lt-anchor" id="analyze"></div>'
-        '<div class="lt-eyebrow">Ad Reference Keyword Finder</div>'
-        '<h1 class="lt-title">레퍼런스 광고를 분석하고<br>다음 소재의 방향을 찾아보세요</h1>'
-        '<p class="lt-lead">이미지나 광고주 요청 문구에서 업종·색감·레이아웃·무드·카피 톤을 읽어내고, '
-        "핀터레스트와 메타 광고 라이브러리에서 바로 쓸 수 있는 검색어로 정리합니다.</p>"
+        '<h1 class="lt-title">레퍼런스 한 장으로<br>검색 키워드를 뽑아드립니다</h1>'
+        '<p class="lt-lead">광고 이미지나 광고주 요청 문구를 넣으면 톤앤매너를 분석해<br>'
+        "핀터레스트·메타 광고 라이브러리 검색어로 바로 정리합니다.</p>"
     )
 
 
