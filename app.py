@@ -1,5 +1,5 @@
 """
-레퍼런스 라이트테이블 — 독립 실행형 웹앱
+레퍼런스 키워드 추출기 — 독립 실행형 웹앱
 
 Claude 채팅이 필요 없다. 광고 레퍼런스 이미지를 올리면 Google Gemini(무료 API)가
 직접 분석해서 업종/색감/레이아웃/무드/카피 톤을 뽑고, 핀터레스트·메타 라이브러리
@@ -224,7 +224,7 @@ def analyze(image_bytes: bytes | None, mime_type: str | None, text_desc: str | N
 
 # ---------------------------------------------------------------- UI ----
 
-st.set_page_config(page_title="Light Table · 광고 레퍼런스 분석", page_icon="🎞️", layout="wide")
+st.set_page_config(page_title="레퍼런스 키워드 추출기", page_icon="🎞️", layout="wide")
 
 # 디자인 토큰 (spacing: 8 12 16 24 32 48 64 96)
 DESIGN_CSS = """
@@ -480,7 +480,10 @@ a.lt-chip-broad:hover b{ color:var(--accent-hover); }
   .lt-header .inner{ padding:0 16px; }
   .lt-header{ height:60px; }
   .lt-nav{ display:none; }
-  .lt-cta{ padding:10px 18px; font-size:14px; }
+  .lt-cta{ padding:10px 16px; font-size:14px; white-space:nowrap; }
+  .lt-logo{ font-size:16px; gap:8px; white-space:nowrap; }
+  .lt-logo .mark{ width:18px; height:18px; border-radius:5px; }
+  .lt-logo .mark::after{ inset:5px; }
   .stApp h1.lt-title{ font-size:30px !important; }
   .stApp p.lt-lead{ font-size:16px; }
   .lt-steps{ margin:32px 0 24px; gap:4px; }
@@ -518,7 +521,7 @@ def Header(active: str) -> None:
     )
     html_block(
         '<div class="lt-header"><div class="inner">'
-        '<a class="lt-logo" href="#analyze"><span class="mark"></span>Light Table</a>'
+        '<a class="lt-logo" href="#analyze"><span class="mark"></span>레퍼런스 키워드 추출기</a>'
         f'<nav class="lt-nav">{nav}</nav>'
         '<a class="lt-cta" href="#analyze">분석 시작하기</a>'
         "</div></div>"
@@ -528,7 +531,7 @@ def Header(active: str) -> None:
 def PageHeader() -> None:
     html_block(
         '<div class="lt-anchor" id="analyze"></div>'
-        '<div class="lt-eyebrow">Ad Reference Light Table</div>'
+        '<div class="lt-eyebrow">Ad Reference Keyword Finder</div>'
         '<h1 class="lt-title">레퍼런스 광고를 분석하고<br>다음 소재의 방향을 찾아보세요</h1>'
         '<p class="lt-lead">이미지나 광고주 요청 문구에서 업종·색감·레이아웃·무드·카피 톤을 읽어내고, '
         "핀터레스트와 메타 광고 라이브러리에서 바로 쓸 수 있는 검색어로 정리합니다.</p>"
@@ -650,7 +653,7 @@ def SearchKeywords(result: dict) -> None:
 def Footer() -> None:
     html_block(
         '<div class="lt-footer">'
-        "<p><strong>Light Table</strong> · 광고 레퍼런스 분석</p>"
+        "<p><strong>레퍼런스 키워드 추출기</strong> · 광고 레퍼런스 분석</p>"
         "<p>핀터레스트·메타 광고 라이브러리의 자동 크롤링과 이미지 자동 수집은 이용약관상 금지되어 있습니다.<br>"
         "검색 결과의 이미지 확인과 저장은 직접 진행해 주세요. 분석에는 Google Gemini가 사용됩니다.</p>"
         "</div>"
