@@ -174,18 +174,46 @@ def is_retryable(e: Exception) -> bool:
     return "UNAVAILABLE" in msg or "503" in msg or isinstance(e, json.JSONDecodeError)
 
 
-def analyze(image_bytes: bytes | None, mime_type: str | None, text_desc: str | None, on_retry=None) -> dict:
+def product_instruction(product: str) -> str:
+    return (
+        f"\n\n광고할 실제 제품: {product}\n"
+        "업종·구체적 키워드와 metaKeywords(업종·제품군·프로모션)는 이 제품 기준으로 만드세요. "
+        "핀터레스트 keywords도 가능하면 제품명을 넣어 '스타일 + 제품 + 광고 형식' 조합으로 만드세요 "
+        '(예: 제품이 "낮잠이불"이고 요청이 "밝고 귀엽게"면 "파스텔 낮잠이불 배너", "귀여운 캐릭터 이불 광고"). '
+        "summary와 attributes.industry도 이 제품을 기준으로 쓰세요."
+    )
+
+
+def analyze(
+    image_bytes: bytes | None,
+    mime_type: str | None,
+    text_desc: str | None,
+    on_retry=None,
+    product: str | None = None,
+) -> dict:
     client = get_client()
 
     parts = []
     if image_bytes:
         parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type or "image/jpeg"))
         prompt = "이 이미지를 분석해서 지정된 JSON 형식으로 응답해주세요."
+        if product:
+            # 레퍼런스는 다른 제품의 광고일 수 있으므로 스타일만 이미지에서 가져온다
+            prompt += (
+                "\n\n이 이미지는 스타일 참고용 레퍼런스입니다. 색감·레이아웃·무드·카피 스타일은 이미지에서 읽되, "
+                "이미지 속 제품이 아래 제품과 달라도 업종·제품 키워드는 아래 제품으로 만드세요."
+                + product_instruction(product)
+            )
         if text_desc:
             prompt += f"\n\n광고주 요청 문구도 함께 참고해서, 이미지와 요청이 겹치는 방향으로 키워드를 만들어주세요:\n{text_desc}"
         parts.append(types.Part.from_text(text=prompt))
     else:
-        parts.append(types.Part.from_text(text=f"다음 텍스트 설명을 분석해서 지정된 JSON 형식으로 응답해주세요:\n\n{text_desc}"))
+        prompt = "다음 텍스트 설명을 분석해서 지정된 JSON 형식으로 응답해주세요."
+        if product:
+            prompt += product_instruction(product)
+        if text_desc:
+            prompt += f"\n\n광고주 요청 문구:\n{text_desc}"
+        parts.append(types.Part.from_text(text=prompt))
 
     config = types.GenerateContentConfig(
         system_instruction=SYSTEM_PROMPT,
@@ -364,6 +392,15 @@ header[data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stDecor
 [data-testid="stTextAreaRootElement"]{ border:1.5px solid var(--line) !important; border-radius:var(--radius-md) !important; background:#FBFBF9 !important; transition:all .2s; }
 [data-testid="stTextAreaRootElement"]:hover{ border-color:#CFCEC6 !important; }
 [data-testid="stTextAreaRootElement"]:focus-within{ border-color:var(--accent) !important; background:#fff !important; box-shadow:0 0 0 4px var(--accent-soft); }
+.stTextInput [data-baseweb="input"], [data-testid="stTextInputRootElement"]{
+  border:1.5px solid var(--line) !important; border-radius:var(--radius-md) !important; background:#FBFBF9 !important; transition:all .2s;
+}
+.stTextInput [data-baseweb="input"]:hover, [data-testid="stTextInputRootElement"]:hover{ border-color:#CFCEC6 !important; }
+.stTextInput [data-baseweb="input"]:focus-within, [data-testid="stTextInputRootElement"]:focus-within{
+  border-color:var(--accent) !important; background:#fff !important; box-shadow:0 0 0 4px var(--accent-soft);
+}
+.stTextInput input{ font-size:16px !important; padding:14px 16px !important; color:var(--ink) !important; background:transparent !important; }
+.stTextInput input::placeholder{ color:#A5A49D; }
 .stTextArea textarea{ font-size:16px !important; line-height:1.7 !important; padding:16px !important; color:var(--ink) !important; background:transparent !important; }
 .stTextArea textarea::placeholder{ color:#A5A49D; }
 
@@ -664,7 +701,7 @@ def Footer() -> None:
 st.session_state.setdefault("history", [])
 
 
-def run_analysis(image_bytes, mime_type, text_desc) -> None:
+def run_analysis(image_bytes, mime_type, text_desc, product=None) -> None:
     gap(16)
     slot = st.empty()
     LoadingState(slot)
@@ -673,7 +710,7 @@ def run_analysis(image_bytes, mime_type, text_desc) -> None:
         LoadingState(slot, f"Gemini 서버가 붐벼서 {wait}초 뒤 다시 시도하는 중 ({round_no}/{len(RETRY_WAITS)})")
 
     try:
-        data = analyze(image_bytes, mime_type, text_desc, on_retry=on_retry)
+        data = analyze(image_bytes, mime_type, text_desc, on_retry=on_retry, product=product)
     except Exception as e:
         slot.empty()
         st.session_state["error"] = friendly_error(e)
@@ -717,16 +754,28 @@ with st.container(border=True, key="input_card"):
             gap(16)
             st.image(file.getvalue(), width="stretch")
         gap(24)
+        product = st.text_input(
+            "제품 (선택)",
+            placeholder="예: 낮잠이불, 이불 — 적으면 이 제품 기준으로 업종·제품 키워드를 만듭니다",
+            key="image_product",
+        )
+        gap(24)
         extra = st.text_area(
             "광고주 요청 문구 (선택)",
-            placeholder="예: 고급스럽고 신뢰감 있게, 20대 여성 타겟 — 함께 적으면 이미지와 요청이 겹치는 방향으로 키워드를 만듭니다",
+            placeholder="예: 밝게, 귀엽게 — 함께 적으면 이미지와 요청이 겹치는 방향으로 키워드를 만듭니다",
             key="image_extra",
             height=100,
         )
         gap(24)
         if st.button("레퍼런스 분석하기  →", key="analyze", disabled=not file):
-            run_analysis(file.getvalue(), file.type, extra.strip() or None)
+            run_analysis(file.getvalue(), file.type, extra.strip() or None, product=product.strip() or None)
     else:
+        product = st.text_input(
+            "제품 (선택)",
+            placeholder="예: 낮잠이불, 이불",
+            key="text_product",
+        )
+        gap(24)
         desc = st.text_area(
             "광고주 요청 문구",
             placeholder="예: 법무법인 광고, 신뢰감 있고 깔끔하게",
@@ -735,10 +784,10 @@ with st.container(border=True, key="input_card"):
         )
         gap(24)
         if st.button("레퍼런스 분석하기  →", key="analyze_text"):
-            if not desc.strip():
-                st.session_state["error"] = "광고주 요청 문구를 입력해 주세요."
+            if not desc.strip() and not product.strip():
+                st.session_state["error"] = "제품이나 광고주 요청 문구를 입력해 주세요."
             else:
-                run_analysis(None, None, desc)
+                run_analysis(None, None, desc.strip() or None, product=product.strip() or None)
 
     if st.session_state.get("error"):
         gap(16)
