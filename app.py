@@ -18,6 +18,7 @@ Claude 채팅이 필요 없다. 광고 레퍼런스 이미지를 올리면 Googl
     4) Deploy 누르면 https://xxxx.streamlit.app 링크가 생기고, 그 링크를 아무나 열어 쓸 수 있다.
 """
 
+import hmac
 import html
 import json
 import time
@@ -90,7 +91,9 @@ def friendly_error(e: Exception) -> str:
     if "API_KEY_INVALID" in msg or "API key not valid" in msg:
         return "API 키가 올바르지 않아요. Streamlit Secrets에 등록한 GEMINI_API_KEY 값을 다시 확인해주세요."
     if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
-        return "요청이 너무 많아요 (무료 한도 초과). 잠시 후 다시 시도해주세요."
+        return "Gemini 무료 한도를 모두 썼어요. 모델 3개를 모두 시도했지만 한도가 남은 모델이 없어요. 한도가 다시 채워진 뒤(보통 몇 분~하루) 시도해주세요."
+    if "NOT_FOUND" in msg or "404" in msg:
+        return "설정된 Gemini 모델을 모두 쓸 수 없어요. Google이 모델을 종료했을 수 있어요. app.py의 MODEL_FALLBACKS에 새 모델 이름을 넣어야 합니다."
     if "UNAVAILABLE" in msg or "503" in msg:
         return "Gemini 서버가 많이 붐벼서 자동으로 3번 다시 시도했지만 응답을 못 받았어요. 1~2분 뒤 다시 눌러주세요."
     if "JSONDecodeError" in e.__class__.__name__:
@@ -170,8 +173,15 @@ RETRY_WAITS = [3, 6]  # 모든 모델이 붐빔(503)이면 이만큼(초) 쉬었
 
 
 def is_retryable(e: Exception) -> bool:
+    """서버가 잠깐 붐빈 경우: 다음 모델로 넘어가고, 모두 붐비면 쉬었다가 다시 시도."""
     msg = str(e)
     return "UNAVAILABLE" in msg or "503" in msg or isinstance(e, json.JSONDecodeError)
+
+
+def is_model_unusable(e: Exception) -> bool:
+    """이 모델만 못 쓰는 경우(종료된 모델, 모델별 무료 한도 소진): 기다리지 않고 다음 모델로."""
+    msg = str(e)
+    return any(s in msg for s in ("NOT_FOUND", "404", "RESOURCE_EXHAUSTED", "429"))
 
 
 def product_instruction(product: str) -> str:
@@ -221,12 +231,16 @@ def analyze(
     )
 
     last_error: Exception | None = None
+    any_busy = False
     for round_no in range(len(RETRY_WAITS) + 1):
         if round_no:
+            if not any_busy:
+                break  # 붐빈 게 아니라 모델 자체를 못 쓰는 경우엔 기다려도 소용없음
             wait = RETRY_WAITS[round_no - 1]
             if on_retry:
                 on_retry(round_no, wait)
             time.sleep(wait)
+        any_busy = False
         for model in MODEL_FALLBACKS:
             try:
                 response = client.models.generate_content(model=model, contents=parts, config=config)
@@ -245,7 +259,9 @@ def analyze(
                 return data
             except Exception as e:
                 last_error = e
-                if not is_retryable(e):
+                if is_retryable(e):
+                    any_busy = True
+                elif not is_model_unusable(e):
                     raise
     raise last_error
 
@@ -331,7 +347,7 @@ header[data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stDecor
 .lt-label{ font-size:13px; font-weight:700; letter-spacing:.1em; color:var(--ink-3); text-transform:uppercase; margin:0 0 12px; }
 
 /* ── Input card (st.container(border=True, key="input_card")) ── */
-.st-key-input_card, .st-key-history_card{
+.st-key-input_card, .st-key-history_card, .st-key-gate_card{
   background:var(--card); border:none !important; border-radius:var(--radius-lg) !important;
   box-shadow:var(--shadow); padding:40px !important;
 }
@@ -416,14 +432,14 @@ header[data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stDecor
 [data-testid="stFileChipName"]{ font-size:15px !important; font-weight:600; color:var(--ink) !important; }
 
 /* Primary CTA */
-.st-key-analyze, .st-key-analyze_text{ width:100% !important; }
-.st-key-analyze .stButton, .st-key-analyze_text .stButton{ width:100%; }
-.st-key-analyze button, .st-key-analyze_text button{
+.st-key-analyze, .st-key-analyze_text, .st-key-gate_submit{ width:100% !important; }
+.st-key-analyze .stButton, .st-key-analyze_text .stButton, .st-key-gate_submit .stButton{ width:100%; }
+.st-key-analyze button, .st-key-analyze_text button, .st-key-gate_submit button{
   width:100%; height:60px; border-radius:var(--radius-md) !important; border:none !important;
   background:var(--accent) !important; transition:all .2s; box-shadow:0 6px 16px rgba(18,153,124,.22);
 }
-.st-key-analyze button p, .st-key-analyze_text button p{ color:#fff !important; font-size:17px !important; font-weight:700; letter-spacing:-.01em; }
-.st-key-analyze button:hover, .st-key-analyze_text button:hover{ background:var(--accent-hover) !important; transform:translateY(-1px); }
+.st-key-analyze button p, .st-key-analyze_text button p, .st-key-gate_submit button p{ color:#fff !important; font-size:17px !important; font-weight:700; letter-spacing:-.01em; }
+.st-key-analyze button:hover, .st-key-analyze_text button:hover, .st-key-gate_submit button:hover{ background:var(--accent-hover) !important; transform:translateY(-1px); }
 .st-key-analyze button:active, .st-key-analyze_text button:active{ transform:translateY(0); box-shadow:none; }
 .st-key-analyze button:disabled{ background:#E3E2DC !important; box-shadow:none; transform:none; cursor:not-allowed; }
 .st-key-analyze button:disabled p{ color:#9A9992 !important; }
@@ -505,6 +521,7 @@ a.lt-chip-broad:hover b{ color:var(--accent-hover); }
 
 .lt-gap-64{ height:64px; } .lt-gap-32{ height:32px; } .lt-gap-24{ height:24px; } .lt-gap-16{ height:16px; }
 .lt-anchor{ position:relative; top:-96px; }
+.lt-gate-head{ text-align:center; margin:48px 0 32px; }
 
 /* ── Responsive ─────────────────────────────────── */
 @media (max-width:1024px){
@@ -725,6 +742,39 @@ def run_analysis(image_bytes, mime_type, text_desc, product=None) -> None:
 # ── Page ─────────────────────────────────────────────────────────────────
 
 html_block(DESIGN_CSS)
+
+
+def PasswordGate() -> None:
+    """Secrets에 APP_PASSWORD가 있으면 비밀번호를 맞혀야 화면이 열린다. 없으면 누구나 사용."""
+    try:
+        password = st.secrets.get("APP_PASSWORD") or ""
+    except Exception:
+        password = ""
+    if not password or st.session_state.get("authed"):
+        return
+
+    html_block(
+        '<div class="lt-header"><div class="inner">'
+        '<span class="lt-logo"><span class="mark"></span>레퍼런스 키워드 추출기</span></div></div>'
+        '<div class="lt-gate-head"><h1 class="lt-title">팀 전용 도구입니다</h1>'
+        '<p class="lt-lead">공유받은 비밀번호를 입력해 주세요.</p></div>'
+    )
+    _, center, _ = st.columns([1, 2, 1])
+    with center, st.container(border=True, key="gate_card"):
+        with st.form("gate", border=False):
+            entered = st.text_input("비밀번호", type="password", key="gate_pw")
+            gap(16)
+            ok = st.form_submit_button("들어가기  →", key="gate_submit")
+        if ok:
+            if hmac.compare_digest(entered.encode(), password.encode()):
+                st.session_state["authed"] = True
+                st.rerun()
+            gap(16)
+            st.error("비밀번호가 맞지 않아요.")
+    st.stop()
+
+
+PasswordGate()
 
 result = st.session_state.get("result")
 Header("analyze")
