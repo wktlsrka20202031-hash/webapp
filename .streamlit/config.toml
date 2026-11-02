@@ -5,3 +5,7 @@ backgroundColor = "#F7F7F3"
 secondaryBackgroundColor = "#FFFFFF"
 textColor = "#111111"
 primaryColor = "#12997C"
+
+# 왼쪽 자동 메뉴는 숨기고, 화면 안의 버튼·링크로만 파트 1 ↔ 파트 2를 오간다
+[client]
+showSidebarNavigation = false

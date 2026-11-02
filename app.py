@@ -28,7 +28,11 @@ import streamlit as st
 from google import genai
 from google.genai import types
 
-MODEL_FALLBACKS = ["gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.5-flash"]
+# 하루 무료 한도(AI Studio 확인): Flash 계열은 모델당 20회, Flash-Lite 3.5/3.1은 각 500회.
+# 품질이 좋은 Flash를 먼저 쓰고, 한도가 차면 Flash-Lite로 이어서 하루 사용 횟수를 늘린다.
+# (gemini-3.8-flash는 출시 직후라 응답 없이 멈추는 일이 있어 뺐다)
+MODEL_FALLBACKS = ["gemini-3.6-flash", "gemini-3-flash-preview",
+                   "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
 
 SYSTEM_PROMPT = """당신은 광고/디자인 크리에이티브 디렉터입니다. 마케터가 올린 레퍼런스(이미지 또는 텍스트 설명)를 분석해서, (1) 핀터레스트에서 비슷한 스타일의 레퍼런스를 찾을 검색 키워드와 (2) 메타 광고 라이브러리(Meta Ad Library)에서 비슷한 업종/형태의 실제 집행 광고 소재를 찾을 검색 키워드를 각각 만들어야 합니다.
 
@@ -91,7 +95,7 @@ def friendly_error(e: Exception) -> str:
     if "API_KEY_INVALID" in msg or "API key not valid" in msg:
         return "API 키가 올바르지 않아요. Streamlit Secrets에 등록한 GEMINI_API_KEY 값을 다시 확인해주세요."
     if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
-        return "Gemini 무료 한도를 모두 썼어요. 모델 3개를 모두 시도했지만 한도가 남은 모델이 없어요. 한도가 다시 채워진 뒤(보통 몇 분~하루) 시도해주세요."
+        return "Gemini 무료 한도를 모두 썼어요. 준비된 모델을 모두 시도했지만 한도가 남은 모델이 없어요. 한도가 다시 채워진 뒤(보통 몇 분~하루) 시도해주세요."
     if "NOT_FOUND" in msg or "404" in msg:
         return "설정된 Gemini 모델을 모두 쓸 수 없어요. Google이 모델을 종료했을 수 있어요. app.py의 MODEL_FALLBACKS에 새 모델 이름을 넣어야 합니다."
     if "UNAVAILABLE" in msg or "503" in msg:
@@ -129,7 +133,8 @@ def get_client() -> genai.Client:
             "Streamlit Cloud 배포: App settings → Secrets에 같은 내용을 등록하세요."
         )
         st.stop()
-    return genai.Client(api_key=api_key)
+    # 60초 넘게 답이 없는 모델은 기다리지 않고 다음 모델로 넘어간다
+    return genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=60_000))
 
 
 _ANGLE_STOPWORDS = {
@@ -444,6 +449,16 @@ header[data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stDecor
 .st-key-analyze button:disabled{ background:#E3E2DC !important; box-shadow:none; transform:none; cursor:not-allowed; }
 .st-key-analyze button:disabled p{ color:#9A9992 !important; }
 
+/* 카피 기획으로 이동 버튼 (분석 버튼과 같은 스타일) */
+.st-key-go_copy{ width:100% !important; }
+.st-key-go_copy .stButton{ width:100%; }
+.st-key-go_copy button{
+  width:100%; height:60px; border-radius:var(--radius-md) !important; border:none !important;
+  background:var(--accent) !important; transition:all .2s; box-shadow:0 6px 16px rgba(18,153,124,.22);
+}
+.st-key-go_copy button p{ color:#fff !important; font-size:17px !important; font-weight:700; letter-spacing:-.01em; }
+.st-key-go_copy button:hover{ background:var(--accent-hover) !important; transform:translateY(-1px); }
+
 /* Alerts */
 [data-testid="stAlert"] > div{ border-radius:var(--radius-md) !important; border:none !important; }
 [data-testid="stAlertContentError"], [data-testid="stAlertContentWarning"]{ font-size:15px; }
@@ -735,6 +750,10 @@ def run_analysis(image_bytes, mime_type, text_desc, product=None) -> None:
     slot.empty()
     st.session_state.pop("error", None)
     st.session_state["result"] = data
+    # 파트 2(카피 기획)로 넘길 정보
+    st.session_state["ref_image"] = (image_bytes, mime_type) if image_bytes else None
+    st.session_state["ref_product"] = product or ""
+    st.session_state["ref_brief"] = text_desc or ""
     st.session_state["history"] = ([data] + st.session_state["history"])[:5]
     st.rerun()
 
@@ -779,6 +798,7 @@ PasswordGate()
 result = st.session_state.get("result")
 Header("analyze")
 PageHeader()
+st.page_link("pages/2_카피_기획.py", label="광고 카피가 필요하다면 → 카피 기획")
 
 mode = st.session_state.get("mode", MODE_IMAGE)
 file = st.session_state.get("upload")
@@ -850,6 +870,18 @@ if result:
     gap(64)
     SectionTitle("검색 키워드", "키워드를 누르면 새 탭에서 검색 결과가 열립니다")
     SearchKeywords(result)
+    gap(64)
+    SectionTitle("카피 기획", "이 레퍼런스의 구성을 참고해 광고 카피를 기획합니다")
+    if st.button("이 분석으로 카피 기획하기  →", key="go_copy"):
+        st.session_state["copy_ref"] = {
+            "summary": result.get("summary", ""),
+            "attributes": result.get("attributes", {}),
+            "image": st.session_state.get("ref_image"),
+            "product": st.session_state.get("ref_product", ""),
+            "brief": st.session_state.get("ref_brief", ""),
+        }
+        st.session_state.pop("p2", None)  # 새 레퍼런스로 파트 2를 처음부터
+        st.switch_page("pages/2_카피_기획.py")
 
 gap(64)
 SectionTitle("분석 기록", "이번 접속에서 분석한 최근 5건", anchor="history")
