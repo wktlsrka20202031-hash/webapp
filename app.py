@@ -28,6 +28,8 @@ import streamlit as st
 from google import genai
 from google.genai import types
 
+from nav import tool_nav
+
 # 하루 무료 한도(AI Studio 확인): Flash 계열은 모델당 20회, Flash-Lite 3.5/3.1은 각 500회.
 # 품질이 좋은 Flash를 먼저 쓰고, 한도가 차면 Flash-Lite로 이어서 하루 사용 횟수를 늘린다.
 # (gemini-3.8-flash는 출시 직후라 응답 없이 멈추는 일이 있어 뺐다)
@@ -797,8 +799,8 @@ PasswordGate()
 
 result = st.session_state.get("result")
 Header("analyze")
+tool_nav("keyword")
 PageHeader()
-st.page_link("pages/2_카피_기획.py", label="광고 카피가 필요하다면 → 카피 기획")
 
 mode = st.session_state.get("mode", MODE_IMAGE)
 file = st.session_state.get("upload")

@@ -10,6 +10,8 @@ import json
 import streamlit as st
 
 import copy_engine as ce
+from clipper import render_installer
+from nav import tool_nav
 
 st.set_page_config(page_title="카피 기획 · 레퍼런스 키워드 추출기", page_icon="🎞️", layout="wide")
 
@@ -187,7 +189,7 @@ local_ok = ce.ollama_available()
 ref_in = st.session_state.get("copy_ref")  # 파트 1에서 넘어온 레퍼런스
 p2 = st.session_state.setdefault("p2", {})
 
-st.page_link("app.py", label="← 레퍼런스 키워드 추출기로 돌아가기")
+tool_nav("copy")
 block('<div class="lt-eyebrow">Copy Planner</div>'
       '<h1 class="lt-title">상세페이지만 넣으면<br>소구점과 카피를 기획합니다</h1>'
       '<p class="lt-lead">자료에 실제로 적힌 내용만 근거로 삼고, 근거 없는 수치·효능·인증·최상급은<br>자동으로 "검증 필요"로 표시합니다.</p>')
@@ -238,10 +240,15 @@ with st.container(border=True, key="p2_input_card"):
 
     link = st.text_input("상세페이지 링크 (선택)", key="p2_link", placeholder="https://...")
     gap(8)
-    with st.expander("링크가 안 읽히거나 링크가 없을 때 — 캡처 이미지 / 텍스트 직접 넣기"):
+    with st.expander("링크가 안 읽힐 때 (쿠팡·스마트스토어 등) — 📋 상세페이지 가져오기 버튼 / 캡처 / 텍스트",
+                     expanded=bool(p2.get("link_failed"))):
+        render_installer()
+        manual = st.text_area("복사한 텍스트 — 📋 가져오기 버튼으로 복사한 내용도 여기에 붙여넣어요", key="p2_manual", height=140)
+        if ce.parse_clip(manual):
+            st.caption(f"✓ 가져오기 버튼으로 복사한 상세페이지예요 (이미지 {len(ce.parse_clip(manual)[2])}장). 위 링크 칸은 비워 둬도 돼요.")
+        gap(8)
         up_files = st.file_uploader("상세페이지 캡처 이미지 (여러 장 가능)", type=["jpg", "jpeg", "png", "webp"],
                                     accept_multiple_files=True, key="p2_up")
-        manual = st.text_area("복사한 텍스트", key="p2_manual", height=140)
     local_only = False
     if local_ok:
         gap(8)
@@ -261,8 +268,18 @@ if run1:
         usage, notes = [], []
         try:
             with st.status("자료를 읽는 중…", expanded=True) as status:
-                page_text, tiles = "", []
-                if link.strip():
+                page_text, tiles, manual_text = "", [], manual.strip()
+                clip = ce.parse_clip(manual)
+                if clip:  # 📋 가져오기 버튼으로 복사한 내용 — 링크보다 우선 (사용자 브라우저에서 읽은 것)
+                    clip_url, page_text, clip_imgs = clip
+                    manual_text = ""
+                    st.write(f"붙여넣은 상세페이지에서 이미지 {len(clip_imgs)}장을 받는 중…")
+                    tiles, more = ce.download_tiles(clip_imgs, clip_url, ce.MAX_TILES)
+                    if more:
+                        notes.append(f"상세 이미지가 길어서 앞부분 {ce.MAX_TILES}조각만 읽었어요")
+                    if clip_imgs and not tiles:
+                        notes.append("이미지는 사이트가 막아서 받지 못했어요 — 글만으로 정리했어요. 이미지 속 글자까지 필요하면 캡처를 올려주세요.")
+                elif link.strip():
                     st.write("링크를 여는 중…")
                     pg = c_fetch(link.strip())
                     notes += pg.notes
@@ -272,13 +289,16 @@ if run1:
                         st.write("⚠️ " + " / ".join(pg.notes))
                 for f in up_files or []:
                     tiles += ce.tiles_from_image(f.getvalue())
-                tiles = tiles[:12]
-                if not page_text and not tiles and not manual.strip():
+                tiles = tiles[:ce.MAX_TILES]
+                if not page_text and not tiles and not manual_text:
                     status.update(label="자료를 읽지 못했어요", state="error")
-                    st.error("링크를 읽지 못했어요. '링크가 안 읽히거나…' 칸에 캡처 이미지나 텍스트를 넣어주세요.")
+                    p2["link_failed"] = True
+                    st.error("링크를 읽지 못했어요. 아래 '링크가 안 읽힐 때' 칸의 📋 상세페이지 가져오기 버튼을 쓰거나, 캡처 이미지를 올려주세요.")
+                    if st.button("방법 보기", key="p2_show_help"):
+                        st.rerun()
                     st.stop()
                 st.write(f"글자 {len(page_text):,}자, 이미지 조각 {len(tiles)}개 — AI가 읽고 정리하는 중…")
-                material, meta = c_material(cfg, local_only, brand.strip(), product.strip(), page_text, manual.strip(), tuple(tiles))
+                material, meta = c_material(cfg, local_only, brand.strip(), product.strip(), page_text, manual_text, tuple(tiles))
                 usage.append(("자료 정리·소구점", meta))
                 status.update(label="자료 정리 완료", state="complete", expanded=False)
             ref_bytes = (ref_upload.getvalue(), ref_upload.type) if ref_upload is not None else None

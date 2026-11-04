@@ -14,6 +14,7 @@ import json
 import re
 import socket
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 
@@ -276,14 +277,172 @@ def tiles_from_image(img_bytes: bytes, max_w: int = 1000, tile_h: int = 1500, ov
     return out
 
 
-def fetch_page(url: str, max_tiles: int = 12) -> Page:
+MAX_TILES = 16  # AI에 넘기는 이미지 조각 수 (조각 하나 ≈ 1,100토큰)
+
+# 상세 설명이 들어 있는 영역 / 상세가 아닌 영역 (id·class·JSON 키 이름으로 판단)
+_DETAIL = re.compile(r"(detail|desc|goods_?info|prd_?info|product_?info|상세)", re.I)
+_NOT_DETAIL = re.compile(r"(review|related|recommend|banner|swiper|slide|event|coupon|popup|login|insta|sticker|thumb|"
+                         r"best|ranking|footer|header|gnb|lnb|nav|menu|cart|basket|quick|share)", re.I)
+_IMG_ATTRS = ("ec-data-src", "data-src", "data-original", "data-lazy-src", "data-lazy", "data-url", "data-echo", "src")
+_IMG_URL = re.compile(r"\.(jpe?g|png|webp)(\?|$)", re.I)
+# 자동 읽기를 막아 두는 큰 쇼핑몰 — 막히면 캡처를 넣으라고 바로 안내한다
+_BLOCKING_SITES = {"coupang.com": "쿠팡", "oliveyoung.co.kr": "올리브영", "musinsa.com": "무신사", "29cm.co.kr": "29CM",
+                   "smartstore.naver.com": "네이버 스마트스토어", "brand.naver.com": "네이버 브랜드스토어",
+                   "11st.co.kr": "11번가", "gmarket.co.kr": "G마켓", "auction.co.kr": "옥션"}
+
+
+def _site_name(url: str) -> str:
+    host = (urlparse(url).hostname or "").lower()
+    return next((v for k, v in _BLOCKING_SITES.items() if host == k or host.endswith("." + k)), "")
+
+
+def _img_src(img) -> str:
+    for a in _IMG_ATTRS:
+        v = (img.get(a) or "").strip()
+        if v and not v.startswith("data:"):
+            return v
+    return (img.get("srcset") or img.get("data-srcset") or "").strip().split(" ")[0]
+
+
+def _area_score(el) -> int:
+    """상세 영역 안에 깊이 들어 있을수록 높은 점수, 리뷰·배너·추천 영역 안이면 -1."""
+    score = 0
+    for p in el.parents:
+        if p.name in ("html", "body", "[document]"):
+            continue
+        name = " ".join([p.get("id") or ""] + list(p.get("class") or [])) if hasattr(p, "get") else ""
+        if not name:
+            continue
+        if _NOT_DETAIL.search(name):
+            return -1
+        if _DETAIL.search(name):
+            score += 1
+    return score
+
+
+def _html_images(soup, base: str, bonus: int = 0) -> list[tuple[int, str]]:
+    out = []
+    for img in soup.find_all("img"):
+        w = re.sub(r"\D", "", str(img.get("width") or ""))
+        if w and int(w) < 200:
+            continue
+        src = _img_src(img)
+        if not src or _SKIP_IMG.search(src):
+            continue
+        score = _area_score(img)
+        if score >= 0:
+            out.append((score + bonus, urljoin(base, src)))
+    return out
+
+
+def _walk_json(o, path: str, base: str, texts: list, imgs: list) -> None:
+    """페이지에 숨어 있는 데이터(JSON)에서 상세 설명 글과 이미지를 찾는다. (컬리·Next.js 쇼핑몰 등)"""
+    if isinstance(o, dict):
+        for k, v in o.items():
+            _walk_json(v, f"{path}.{k}", base, texts, imgs)
+    elif isinstance(o, list):
+        for v in o:
+            _walk_json(v, path, base, texts, imgs)
+    elif isinstance(o, str):
+        if _NOT_DETAIL.search(path) or not _DETAIL.search(path):
+            return
+        s = o.strip()
+        if s[:1] in "{[":
+            try:
+                _walk_json(json.loads(s), path, base, texts, imgs)
+                return
+            except ValueError:
+                pass
+        if "<img" in s or "</p>" in s or "<br" in s:
+            sub = BeautifulSoup(s, "html.parser")
+            imgs.extend(_html_images(sub, base, bonus=3))
+            texts.extend(ln.strip() for ln in sub.get_text("\n").splitlines() if ln.strip())
+        elif s.startswith(("http", "//")) and _IMG_URL.search(s):
+            imgs.append((3, urljoin(base, s)))
+        elif len(s) >= 10 and not s.startswith(("http", "//")):
+            texts.append(s)
+
+
+def _embedded_json(soup) -> list:
+    out = []
+    for sc in soup.find_all("script"):
+        body = (sc.string or "").strip()
+        if not body:
+            continue
+        kind = (sc.get("type") or "").lower()
+        try:
+            if "json" in kind:
+                out.append(json.loads(body))
+            elif m := re.search(r"window\.__[A-Z_]+__\s*=\s*", body):  # window.__PRELOADED_STATE__ = {...}
+                out.append(json.JSONDecoder().raw_decode(body[m.end():])[0])
+        except ValueError:
+            continue
+    return out
+
+
+def _ld_product(data) -> list[str]:
+    """schema.org Product 정보(제품명·브랜드·가격·설명)를 한 줄씩."""
+    items = data if isinstance(data, list) else data.get("@graph", [data]) if isinstance(data, dict) else []
+    lines = []
+    for it in items:
+        if not isinstance(it, dict) or "Product" not in str(it.get("@type", "")):
+            continue
+        brand = it.get("brand")
+        brand = brand.get("name") if isinstance(brand, dict) else brand
+        offers = it.get("offers")
+        offers = offers[0] if isinstance(offers, list) and offers else offers
+        price = offers.get("price") if isinstance(offers, dict) else None
+        lines += [f"제품명: {it.get('name')}" if it.get("name") else "", f"브랜드: {brand}" if brand else "",
+                  f"가격: {price}원" if price else "", str(it.get("description") or "")]
+    return [ln for ln in lines if ln]
+
+
+def download_tiles(urls: list[str], referer: str, max_tiles: int) -> tuple[list, bool]:
+    """이미지를 6장씩 동시에 받아 순서대로 조각낸다. 조각이 충분히 모이면 멈춘다."""
+    def one(u):
+        try:
+            ir, ibytes, _ = _get(u, referer=referer, max_bytes=4_000_000)
+            return tiles_from_image(ibytes) if ir.status_code < 400 else []
+        except Exception:  # noqa: BLE001
+            return []
+
+    tiles: list[tuple[bytes, str]] = []
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        for i in range(0, len(urls), 6):
+            for t in ex.map(one, urls[i:i + 6]):
+                tiles.extend(t)
+            if len(tiles) >= max_tiles:
+                return tiles[:max_tiles], i + 6 < len(urls) or len(tiles) > max_tiles
+    return tiles, False
+
+
+CLIP_MARK = "[상세페이지 가져오기]"  # clipper.py 북마크가 복사한 내용의 첫 줄
+
+
+def parse_clip(text: str) -> tuple[str, str, list[str]] | None:
+    """북마크로 복사한 내용이면 (페이지 주소, 본문 글, 이미지 주소 목록), 아니면 None."""
+    t = (text or "").strip()
+    if not t.startswith(CLIP_MARK):
+        return None
+    first, _, rest = t.partition("\n")
+    page_url = first[len(CLIP_MARK):].strip()
+    body, _, imgs = rest.partition("---이미지---")
+    body = body.replace("---본문---", "", 1).strip()
+    urls = [u.strip() for u in imgs.splitlines() if u.strip().startswith(("http://", "https://"))]
+    return page_url, body, list(dict.fromkeys(urls))
+
+
+def fetch_page(url: str, max_tiles: int = MAX_TILES) -> Page:
     notes: list[str] = []
+    site = _site_name(url)
+    blocked_msg = (f"{site}은(는) 자동으로 읽는 것을 막아 둔 사이트예요. 상세페이지를 캡처해서 아래 칸에 올려주세요."
+                   if site else "")
     try:
         r, body, final = _get(url)
     except Exception as e:  # noqa: BLE001
         return Page(False, notes=[f"링크를 열지 못했어요: {str(e)[:80]}"])
     if r.status_code >= 400:
-        return Page(False, notes=[f"링크가 막혀 있어요 (응답 코드 {r.status_code})"])
+        return Page(False, notes=[blocked_msg or f"링크가 막혀 있어요 (응답 코드 {r.status_code})"])
     try:
         html = body.decode("utf-8")
     except UnicodeDecodeError:
@@ -291,48 +450,52 @@ def fetch_page(url: str, max_tiles: int = 12) -> Page:
     soup = BeautifulSoup(html, "html.parser")
 
     head = []
-    for sel, attr in (("meta[property='og:title']", "content"), ("meta[property='og:description']", "content"),
-                      ("meta[name='description']", "content")):
+    for sel in ("meta[property='og:title']", "meta[property='og:description']", "meta[name='description']"):
         el = soup.select_one(sel)
-        if el and el.get(attr):
-            head.append(el[attr].strip())
-    for t in soup(["script", "style", "noscript", "svg", "iframe", "form", "header", "footer", "nav"]):
-        t.decompose()
-    lines = [ln.strip() for ln in soup.get_text("\n").splitlines() if ln.strip()]
-    text = "\n".join(dict.fromkeys(head + lines))[:20000]
+        if el and el.get("content"):
+            head.append(el["content"].strip())
 
-    cands: list[str] = []
-    for img in soup.find_all("img"):
-        try:
-            if int(re.sub(r"\D", "", str(img.get("width") or "0")) or 0) not in range(0, 1) and \
-               int(re.sub(r"\D", "", str(img.get("width") or "999")) or 999) < 200:
-                continue
-        except ValueError:
-            pass
-        src = (img.get("src") or img.get("data-src") or img.get("data-original")
-               or img.get("data-lazy-src") or (img.get("srcset") or "").split(" ")[0])
-        if not src or src.startswith("data:") or _SKIP_IMG.search(src):
-            continue
-        u = urljoin(final, src.strip())
-        if u not in cands:
-            cands.append(u)
+    # 1) 숨은 데이터(JSON)에서 제품 정보·상세 설명
+    json_texts: list[str] = []
+    cands: list[tuple[int, str]] = []
+    for data in _embedded_json(soup):
+        head += _ld_product(data)
+        _walk_json(data, "", final, json_texts, cands)
 
-    tiles: list[tuple[bytes, str]] = []
-    for u in cands[:30]:
-        if len(tiles) >= max_tiles:
-            notes.append(f"이미지가 많아서 앞부분 {max_tiles}조각만 읽었어요")
-            break
+    # 2) <noscript> 안의 이미지 (지연 로딩 페이지는 진짜 주소가 여기 있다)
+    for ns in soup.find_all("noscript"):
+        if (s := _area_score(ns)) >= 0:
+            cands += _html_images(BeautifulSoup(ns.decode_contents(), "html.parser"), final, bonus=s)
+
+    # 3) 상세 설명을 따로 띄우는 iframe (같은 사이트 안, 최대 2개)
+    for fr in [f for f in soup.find_all("iframe") if _DETAIL.search(" ".join([f.get("id") or "", f.get("src") or ""]))][:2]:
         try:
-            ir, ibytes, _ = _get(u, referer=final, max_bytes=4_000_000)
-            if ir.status_code >= 400:
+            fu = urljoin(final, fr.get("src"))
+            if urlparse(fu).hostname != urlparse(final).hostname:
                 continue
-            tiles.extend(tiles_from_image(ibytes))
+            fr_r, fr_body, fr_final = _get(fu, referer=final)
+            if fr_r.status_code < 400:
+                fsoup = BeautifulSoup(fr_body.decode("utf-8", errors="replace"), "html.parser")
+                cands += _html_images(fsoup, fr_final, bonus=3)
+                json_texts += [ln.strip() for ln in fsoup.get_text("\n").splitlines() if ln.strip()]
         except Exception:  # noqa: BLE001
             continue
-    tiles = tiles[:max_tiles]
+
+    # 4) 본문 이미지 — 상세 영역 점수 순 (같은 점수면 페이지 순서)
+    for t in soup(["script", "style", "noscript", "svg", "iframe", "form", "header", "footer", "nav"]):
+        t.decompose()
+    cands += _html_images(soup, final)
+    lines = [ln.strip() for ln in soup.get_text("\n").splitlines() if ln.strip()]
+    text = "\n".join(dict.fromkeys(head + json_texts + lines))[:20000]
+
+    order = sorted(range(len(cands)), key=lambda i: -cands[i][0])
+    urls = list(dict.fromkeys(cands[i][1] for i in order))[:40]
+    tiles, more = download_tiles(urls, final, max_tiles)
+    if more:
+        notes.append(f"상세 이미지가 길어서 앞부분 {max_tiles}조각만 읽었어요")
 
     if len(text) < 200 and not tiles:
-        return Page(False, text, [], notes + ["페이지에서 읽을 내용이 거의 없어요 (막혀 있거나 화면을 JS로 그리는 페이지일 수 있어요)"])
+        return Page(False, text, [], notes + [blocked_msg or "페이지에서 읽을 내용이 거의 없어요 (막혀 있거나 화면을 JS로 그리는 페이지일 수 있어요)"])
     if len(text) < 200:
         notes.append("글자는 거의 없고 이미지 위주 페이지예요 — 이미지 속 글자를 AI가 읽어요")
     return Page(True, text, tiles, notes)
