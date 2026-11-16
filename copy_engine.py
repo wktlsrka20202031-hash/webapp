@@ -121,10 +121,44 @@ def _ollama_once(cfg: Cfg, instruction: str, parts: list) -> tuple[dict, dict]:
                   "output_tokens": d.get("eval_count"), "seconds": round(time.time() - t0, 1)}
 
 
-def _gemini_once(cfg: Cfg, model: str, instruction: str, parts: list) -> tuple[dict, dict]:
+def _grounding(r) -> tuple[list[dict], list[str]]:
+    """검색으로 참고한 사이트 목록과, 링크 읽기에 실패한 주소 목록."""
+    sources, failed = [], []
+    try:
+        cand = r.candidates[0]
+    except (AttributeError, IndexError, TypeError):
+        return sources, failed
+    gm = getattr(cand, "grounding_metadata", None)
+    for ch in (getattr(gm, "grounding_chunks", None) or []):
+        web = getattr(ch, "web", None)
+        if web and getattr(web, "uri", None):
+            sources.append({"title": str(getattr(web, "title", "") or ""), "uri": str(web.uri)})
+    um = getattr(cand, "url_context_metadata", None)
+    for m in (getattr(um, "url_metadata", None) or []):
+        if "SUCCESS" not in str(getattr(m, "url_retrieval_status", "")):
+            failed.append(str(getattr(m, "retrieved_url", "") or ""))
+    uniq = list({s["uri"]: s for s in sources}.values())
+    return uniq, failed
+
+
+def _gemini_once(cfg: Cfg, model: str, instruction: str, parts: list, tools: list | None = None) -> tuple[dict, dict]:
     client = genai.Client(api_key=cfg.api_key, http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_MS))
     gparts = []
     gemma = model.startswith("gemma")
+    if tools:  # 웹 검색·링크 읽기: 일반 텍스트로 받고 참고한 사이트를 함께 돌려준다
+        for p in parts:
+            gparts.append(types.Part.from_text(text=p[1]) if p[0] == "text"
+                          else types.Part.from_bytes(data=p[1], mime_type=p[2]))
+        t0 = time.time()
+        r = client.models.generate_content(model=model, contents=gparts,
+                                           config=types.GenerateContentConfig(system_instruction=instruction, tools=tools))
+        if not (r.text or "").strip():
+            raise ValueError("EMPTY_RESPONSE")
+        sources, failed = _grounding(r)
+        u = r.usage_metadata
+        return {"text": r.text.strip(), "sources": sources, "url_failed": failed}, {
+            "model": model, "prompt_tokens": getattr(u, "prompt_token_count", None),
+            "output_tokens": getattr(u, "candidates_token_count", None), "seconds": round(time.time() - t0, 1)}
     if gemma:  # Gemma는 시스템 지시문·JSON 모드가 없어서 본문 앞에 붙인다
         gparts.append(types.Part.from_text(text=instruction))
     for p in parts:
@@ -145,9 +179,13 @@ def _gemini_once(cfg: Cfg, model: str, instruction: str, parts: list) -> tuple[d
                   "seconds": round(time.time() - t0, 1)}
 
 
-def call_json(cfg: Cfg, chain: list[str], instruction: str, parts: list, expect: str | None = None) -> tuple[dict, dict]:
+def call_json(cfg: Cfg, chain: list[str], instruction: str, parts: list, expect: str | None = None,
+              tools: list | None = None) -> tuple[dict, dict]:
     """모델을 차례로 시도한다. 한도(하루)·붐빔·분당 한도에 걸리면 다음 모델로 넘어간다.
-    parts: ("text", str) 또는 ("image", bytes, mime) 목록."""
+    parts: ("text", str) 또는 ("image", bytes, mime) 목록.
+    tools를 주면(웹 검색 등) Gemini만 쓰고, 결과는 {"text", "sources", "url_failed"}."""
+    if tools:
+        chain = [m for m in chain if not m.startswith("gemma")]
     n_img = sum(1 for p in parts if p[0] == "image")
     est_tokens = sum(len(p[1]) for p in parts if p[0] == "text") // 1.5 + n_img * 1100
     tries: list[tuple[str, str]] = []
@@ -163,7 +201,7 @@ def call_json(cfg: Cfg, chain: list[str], instruction: str, parts: list, expect:
                     continue
                 attempted = True
                 try:
-                    data, meta = _gemini_once(cfg, m, instruction, parts)
+                    data, meta = _gemini_once(cfg, m, instruction, parts, tools)
                     data = _coerce(data, expect)
                     meta["tries"] = tries
                     return data, meta
@@ -185,6 +223,8 @@ def call_json(cfg: Cfg, chain: list[str], instruction: str, parts: list, expect:
             if waits:
                 time.sleep(min(max(min(waits), 1), 25))
 
+    if tools:  # 이 컴퓨터의 AI는 웹 검색을 못 한다
+        raise AllModelsFailed(tries)
     if cfg.local_only or ollama_available(cfg.ollama_host):
         try:
             data, meta = _ollama_once(cfg, instruction, parts)
@@ -435,8 +475,9 @@ def parse_clip(text: str) -> tuple[str, str, list[str]] | None:
 def fetch_page(url: str, max_tiles: int = MAX_TILES) -> Page:
     notes: list[str] = []
     site = _site_name(url)
-    blocked_msg = (f"{site}은(는) 자동으로 읽는 것을 막아 둔 사이트예요. 상세페이지를 캡처해서 아래 칸에 올려주세요."
-                   if site else "")
+    if site:  # 막아 둔 사이트는 두드리지 않고, 웹 검색·구글의 링크 읽기로 자료를 모은다
+        return Page(False, notes=[f"{site}은(는) 직접 읽기를 막아 둔 사이트라 웹 검색으로 자료를 모았어요"])
+    blocked_msg = ""
     try:
         r, body, final = _get(url)
     except Exception as e:  # noqa: BLE001
@@ -533,11 +574,43 @@ COPY_SYSTEM = """당신은 퍼포먼스 광고 카피라이터입니다. 아래 
 JSON으로만: {"copies":[{"appeal":"소구점 이름","hook":"후킹 유형","main_title":"","sub_copy":"","cta":"","label":"","evidence":""}]}"""
 
 
+RESEARCH_SYSTEM = """당신은 광고 카피 기획을 위한 제품 리서처입니다. Google 검색과(링크가 주어지면) 그 링크를 읽어서 제품 정보를 모읍니다.
+찾을 곳: 공식몰·브랜드 사이트, 네이버쇼핑·쿠팡·올리브영 등 판매 페이지의 상품 설명, 구매 후기, 블로그·카페 사용기.
+
+[규칙]
+- 검색 결과와 링크에 실제로 적힌 내용만 쓰세요. 추측이나 상식으로 채우지 말고, 찾지 못한 정보는 쓰지 마세요.
+- 다른 제품(같은 브랜드의 다른 제품 포함) 정보를 섞지 마세요. 어떤 제품인지 확실하지 않으면 맨 위에 그렇게 적으세요.
+- 문장은 출처에 적힌 표현을 최대한 그대로 옮기세요. 각 줄 끝에 (출처: 사이트 이름)을 붙이세요.
+- 효능·수치·인증·순위는 출처에 적힌 그대로만 옮기고, 부풀리지 마세요.
+
+아래 형식의 일반 텍스트로만 답하세요(머리말·맺음말 없이).
+[제품 기본 정보] 정확한 제품명, 용량·구성, 가격, 주요 성분·소재·스펙
+[판매 페이지가 강조하는 내용]
+[구매 후기에서 반복되는 말] 좋다는 점 / 아쉽다는 점
+[구매 전 고민·비교 포인트]"""
+
+SEARCH_CHAIN = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3-flash-preview", "gemini-3.6-flash"]
+
+
+def web_research(cfg: Cfg, brand: str, product: str, url: str = "") -> tuple[dict, dict]:
+    """브랜드·제품명(과 링크)으로 웹을 조사해 자료 글을 만든다. 막힌 쇼핑몰은 검색 결과·구글의 링크 읽기로 대신한다.
+    결과: {"text", "sources":[{"title","uri"}], "url_failed":[...]}"""
+    tools = [types.Tool(google_search=types.GoogleSearch())]
+    ask = f"브랜드: {brand}\n제품: {product}\n"
+    if url:
+        tools.append(types.Tool(url_context=types.UrlContext()))
+        ask += f"상세페이지 링크: {url}\n이 링크를 먼저 읽고, 부족한 내용은 검색으로 보충하세요.\n"
+    else:
+        ask += "이 제품을 검색해서 조사하세요.\n"
+    return call_json(cfg, SEARCH_CHAIN, RESEARCH_SYSTEM, [("text", ask)], tools=tools)
+
+
 # ------------------------------------------------------------------ 단계 ----
 def analyze_material(cfg: Cfg, brand: str, product: str, page_text: str, manual_text: str,
-                     images: list[tuple[bytes, str]]) -> tuple[dict, dict]:
+                     images: list[tuple[bytes, str]], web_text: str = "") -> tuple[dict, dict]:
     parts: list = [("text", f"[브랜드] {brand}\n[제품] {product}\n\n[자료 — 상세페이지 글자]\n{page_text[:15000] or '(없음)'}\n\n"
-                            f"[자료 — 직접 붙여넣은 텍스트]\n{manual_text[:15000] or '(없음)'}")]
+                            f"[자료 — 직접 붙여넣은 텍스트]\n{manual_text[:15000] or '(없음)'}\n\n"
+                            f"[자료 — 웹 검색으로 모은 내용 (공식몰·판매처·후기)]\n{web_text[:12000] or '(없음)'}")]
     if images:
         parts.append(("text", f"[자료 — 이미지 {len(images)}장] 아래 이미지는 상세페이지(또는 캡처)를 위에서 아래로 자른 조각입니다. "
                               "이미지 속 글자를 순서대로 빠짐없이 읽어 image_text에 적으세요."))
@@ -545,14 +618,15 @@ def analyze_material(cfg: Cfg, brand: str, product: str, page_text: str, manual_
     data, meta = call_json(cfg, LITE_CHAIN, MATERIAL_SYSTEM, parts, expect="facts")
 
     image_text = str(data.get("image_text") or "")
-    material_text = "\n".join([page_text, manual_text, image_text])
-    mn = norm(material_text)
+    material_text = "\n".join([page_text, manual_text, image_text, web_text])
 
     def source_of(q: str) -> str:
         if quote_found(q, norm(page_text) + norm(manual_text)):
             return "글자"
         if quote_found(q, norm(image_text)):
             return "이미지(AI가 읽음)"
+        if quote_found(q, norm(web_text)):
+            return "웹 검색"
         return ""
 
     facts = []

@@ -1,16 +1,18 @@
 """파트 2 — 카피 기획.
 
-브랜드·제품명 + 상세페이지 링크(또는 캡처/텍스트) → 제품 사실 + 소구점 3개 → 선택한 소구마다 카피 5개.
+브랜드·제품명(+ 선택: 링크·캡처·텍스트) → 웹 검색으로 자료 자동 수집 → 제품 사실 + 소구점 3개 → 소구마다 카피 5개를 한 번에.
 자료에 없는 수치·효능·인증·최상급은 자동으로 "검증 필요"로 표시한다.
 디자인 토큰은 파트 1(app.py)과 같다.
 """
+import hmac
 import html
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 import streamlit as st
 
 import copy_engine as ce
-from clipper import render_installer
+from clipper import receive_clip, render_installer, title_from_clip
 from nav import tool_nav
 
 st.set_page_config(page_title="카피 기획 · 레퍼런스 키워드 추출기", page_icon="🎞️", layout="wide")
@@ -126,15 +128,28 @@ block(CSS)
 block('<div class="lt-header"><div class="inner"><span class="lt-logo"><span class="mark"></span>레퍼런스 키워드 추출기</span>'
       '<span class="lt-tag">카피 기획</span></div></div>')
 
-# 파트 1의 비밀번호 잠금을 그대로 따른다 (이 페이지 주소로 바로 들어와도 우회되지 않게)
+# 📋 북마크가 보낸 상세페이지 — 비밀번호 화면에서 도착해도 잃지 않게 먼저 받아 둔다
+_clip_in = receive_clip()
+if _clip_in and ce.parse_clip(_clip_in):
+    st.session_state["p2_pending_clip"] = _clip_in
+
+# 파트 1과 같은 비밀번호 잠금 (북마크로 새 탭이 열려도 여기서 바로 입력할 수 있게)
 try:
     _password = st.secrets.get("APP_PASSWORD") or ""
 except Exception:
     _password = ""
 if _password and not st.session_state.get("authed"):
-    block('<h1 class="lt-title">팀 전용 도구입니다</h1><p class="lt-lead">첫 화면에서 비밀번호를 입력한 뒤 들어와 주세요.</p>')
+    block('<h1 class="lt-title">팀 전용 도구입니다</h1><p class="lt-lead">공유받은 비밀번호를 입력해 주세요.'
+          + (' 비밀번호를 넣으면 보내온 상세페이지로 바로 시작해요.' if st.session_state.get("p2_pending_clip") else '') + '</p>')
     gap(24)
-    st.page_link("app.py", label="첫 화면으로 가기 →")
+    with st.form("p2_gate", border=False):
+        _entered = st.text_input("비밀번호", type="password", key="p2_gate_pw")
+        _ok = st.form_submit_button("들어가기  →")
+    if _ok:
+        if hmac.compare_digest(_entered.encode(), _password.encode()):
+            st.session_state["authed"] = True
+            st.rerun()
+        st.error("비밀번호가 맞지 않아요.")
     st.stop()
 
 
@@ -168,8 +183,13 @@ def c_fetch(url: str):
 
 
 @st.cache_data(show_spinner=False, ttl=86400, max_entries=60)
-def c_material(_cfg, local_only, brand, product, page_text, manual_text, images):
-    return ce.analyze_material(_cfg, brand, product, page_text, manual_text, list(images))
+def c_research(_cfg, brand, product, url):
+    return ce.web_research(_cfg, brand, product, url)
+
+
+@st.cache_data(show_spinner=False, ttl=86400, max_entries=60)
+def c_material(_cfg, local_only, brand, product, page_text, manual_text, images, web_text=""):
+    return ce.analyze_material(_cfg, brand, product, page_text, manual_text, list(images), web_text)
 
 
 @st.cache_data(show_spinner=False, ttl=86400, max_entries=60)
@@ -189,15 +209,25 @@ local_ok = ce.ollama_available()
 ref_in = st.session_state.get("copy_ref")  # 파트 1에서 넘어온 레퍼런스
 p2 = st.session_state.setdefault("p2", {})
 
+# 북마크로 받은 상세페이지가 있으면 입력칸을 채우고 바로 실행한다
+_pending = st.session_state.pop("p2_pending_clip", None)
+if _pending:
+    _, _body, _ = ce.parse_clip(_pending)
+    st.session_state["p2_manual"] = _pending
+    st.session_state["p2_link"] = ""
+    if not (st.session_state.get("p2_product") or "").strip():
+        st.session_state["p2_product"] = title_from_clip(_body)
+    p2.update(material=None, copies=None, auto_run=True, from_clip=True)
+
 tool_nav("copy")
 block('<div class="lt-eyebrow">Copy Planner</div>'
-      '<h1 class="lt-title">상세페이지만 넣으면<br>소구점과 카피를 기획합니다</h1>'
+      '<h1 class="lt-title">브랜드명·제품명만 넣으면<br>소구점부터 카피까지 한 번에</h1>'
       '<p class="lt-lead">자료에 실제로 적힌 내용만 근거로 삼고, 근거 없는 수치·효능·인증·최상급은<br>자동으로 "검증 필요"로 표시합니다.</p>')
 
-step = 2 if p2.get("copies") else 1 if p2.get("material") else 0
+step = 3 if p2.get("copies") else 2 if p2.get("material") else 0
 block('<ol class="lt-steps">' + "".join(
     f'<li class="{"done" if i < step else "current" if i == step else ""}"><span class="n">{"✓" if i < step else i + 1}</span>{lbl}</li>'
-    for i, lbl in enumerate(["자료 입력", "소구점 선택", "카피 확인"])) + "</ol>")
+    for i, lbl in enumerate(["자료 입력", "자료 조사·소구점", "카피 완성"])) + "</ol>")
 
 # 파트 1에서 넘어오면 레퍼런스 구조를 읽고, 비어 있는 칸에 제품명(없으면 이미지에 보이는 이름)을 채워 둔다
 if ref_in and not p2.get("handoff_done"):
@@ -239,9 +269,13 @@ with st.container(border=True, key="p2_input_card"):
         gap(16)
 
     link = st.text_input("상세페이지 링크 (선택)", key="p2_link", placeholder="https://...")
+    st.caption("링크가 없어도 돼요. 브랜드명·제품명으로 공식몰·판매처·구매 후기를 자동으로 검색해서 자료를 모아요.")
     gap(8)
-    with st.expander("링크가 안 읽힐 때 (쿠팡·스마트스토어 등) — 📋 상세페이지 가져오기 버튼 / 캡처 / 텍스트",
+    use_web = st.checkbox("웹 검색으로 자료 자동 보강 (공식몰·쇼핑몰·후기·블로그)", value=True, key="p2_web")
+    gap(8)
+    with st.expander("자료를 직접 더 넣고 싶을 때 (선택) — 캡처 / 텍스트 / 📋 상세페이지 가져오기 버튼",
                      expanded=bool(p2.get("link_failed"))):
+        st.caption("자동 조사로는 상세페이지 이미지 속 글자까지는 못 읽을 때가 있어요. 그 내용까지 꼭 반영하고 싶을 때만 쓰세요.")
         render_installer()
         manual = st.text_area("복사한 텍스트 — 📋 가져오기 버튼으로 복사한 내용도 여기에 붙여넣어요", key="p2_manual", height=140)
         if ce.parse_clip(manual):
@@ -256,54 +290,108 @@ with st.container(border=True, key="p2_input_card"):
     gap(8)
     st.caption("무료 구글 AI를 쓰기 때문에 입력한 내용이 구글 서비스 개선에 쓰일 수 있어요. 공개된 상세페이지는 괜찮지만, 출시 전 자료나 계약 내용은 넣지 마세요.")
     gap(16)
-    run1 = st.button("자료 읽고 소구점 뽑기  →", type="primary", key="p2_run1")
+    run1 = st.button("자료 조사부터 카피까지 한 번에 만들기  →", type="primary", key="p2_run1") or p2.pop("auto_run", False)
+    if p2.get("from_clip") and ce.parse_clip(manual):
+        st.caption("✓ 📋 북마크로 보내온 상세페이지로 진행해요. 브랜드명이 비어 있으면 자료에서 찾아요.")
+
+def make_copies(cfg, material, local_only) -> None:
+    """정리된 자료의 소구점 전부로 카피를 쓰고 검수한다. 결과는 p2에 저장."""
+    usage = list(p2.get("usage", []))
+    ref_struct, ref_text = (p2.get("ref") or {}).get("structure"), (p2.get("ref") or {}).get("reference_text", "")
+    if p2.get("ref_upload"):
+        st.write("레퍼런스의 구성만 읽는 중…")
+        rr, rm = c_ref(cfg, local_only, p2["ref_upload"], "")
+        ref_struct, ref_text = rr["structure"], rr["reference_text"]
+        usage.append(("레퍼런스 구조", rm))
+    appeals = material["appeals"]
+    st.write(f"소구점 {len(appeals)}개 × 카피 5개를 쓰고 검수하는 중…")
+    copies, meta, dropped = c_copies(cfg, local_only, p2["brand"], p2["product"],
+                                     json.dumps(material["facts"], ensure_ascii=False),
+                                     json.dumps(appeals, ensure_ascii=False),
+                                     json.dumps(ref_struct or {}, ensure_ascii=False),
+                                     material["material_text"], ref_text,
+                                     (ref_in or {}).get("brief", ""))
+    usage.append(("카피 작성", meta))
+    if meta.get("audit"):
+        usage.append(("AI 검수", meta["audit"]))
+    p2.update(copies=copies, dropped=dropped, usage=usage, copy_error=None)
+
+
+def collect_direct(link_url: str, clip, up_files) -> tuple[str, list, list]:
+    """링크·북마크 복사본·캡처에서 글자와 이미지 조각을 모은다 (AI를 쓰지 않아서 따로 돌려도 된다)."""
+    page_text, tiles, notes = "", [], []
+    if clip:  # 📋 가져오기 버튼으로 복사한 내용 — 사용자 브라우저에서 읽은 것이라 링크보다 우선
+        clip_url, page_text, clip_imgs = clip
+        tiles, more = ce.download_tiles(clip_imgs, clip_url, ce.MAX_TILES)
+        if more:
+            notes.append(f"상세 이미지가 길어서 앞부분 {ce.MAX_TILES}조각만 읽었어요")
+        if clip_imgs and not tiles:
+            notes.append("붙여넣은 상세페이지의 이미지는 사이트가 막아서 받지 못했어요")
+    elif link_url:
+        pg = ce.fetch_page(link_url)
+        notes += pg.notes
+        if pg.ok:
+            page_text, tiles = pg.text, list(pg.images)
+    for f in up_files:
+        tiles += ce.tiles_from_image(f)
+    return page_text, tiles[:ce.MAX_TILES], notes
+
 
 if run1:
-    if not brand.strip() or not product.strip():
+    if not product.strip() or not (brand.strip() or ce.parse_clip(manual)):
         st.warning("브랜드명과 제품명을 입력해주세요.")
-    elif not (link.strip() or up_files or manual.strip()):
-        st.warning("자료를 넣어주세요. 상세페이지 링크, 캡처 이미지, 복사한 텍스트 중 하나면 돼요.")
+    elif not (use_web and not local_only) and not (link.strip() or up_files or manual.strip()):
+        st.warning("웹 검색을 끄면 자료가 필요해요. 상세페이지 링크, 캡처 이미지, 복사한 텍스트 중 하나를 넣어주세요.")
     else:
         cfg = ce.Cfg(api_key=key, local_only=local_only)
-        usage, notes = [], []
+        usage = [u for u in p2.get("usage", []) if u[0] == "레퍼런스 구조"]
+        notes, web = [], None
+        b, pr, url = brand.strip(), product.strip(), link.strip()
+        clip = ce.parse_clip(manual)
+        manual_text = "" if clip else manual.strip()
+        p2.update(material=None, copies=None, copy_error=None, web=None, brand=b, product=pr,
+                  ref_upload=(ref_upload.getvalue(), ref_upload.type) if ref_upload is not None else None)
         try:
-            with st.status("자료를 읽는 중…", expanded=True) as status:
-                page_text, tiles, manual_text = "", [], manual.strip()
-                clip = ce.parse_clip(manual)
-                if clip:  # 📋 가져오기 버튼으로 복사한 내용 — 링크보다 우선 (사용자 브라우저에서 읽은 것)
-                    clip_url, page_text, clip_imgs = clip
-                    manual_text = ""
-                    st.write(f"붙여넣은 상세페이지에서 이미지 {len(clip_imgs)}장을 받는 중…")
-                    tiles, more = ce.download_tiles(clip_imgs, clip_url, ce.MAX_TILES)
-                    if more:
-                        notes.append(f"상세 이미지가 길어서 앞부분 {ce.MAX_TILES}조각만 읽었어요")
-                    if clip_imgs and not tiles:
-                        notes.append("이미지는 사이트가 막아서 받지 못했어요 — 글만으로 정리했어요. 이미지 속 글자까지 필요하면 캡처를 올려주세요.")
-                elif link.strip():
-                    st.write("링크를 여는 중…")
-                    pg = c_fetch(link.strip())
-                    notes += pg.notes
-                    if pg.ok:
-                        page_text, tiles = pg.text, list(pg.images)
-                    else:
-                        st.write("⚠️ " + " / ".join(pg.notes))
-                for f in up_files or []:
-                    tiles += ce.tiles_from_image(f.getvalue())
-                tiles = tiles[:ce.MAX_TILES]
-                if not page_text and not tiles and not manual_text:
-                    status.update(label="자료를 읽지 못했어요", state="error")
+            with st.status("자료를 모으는 중…", expanded=True) as status:
+                # 링크 읽기(이 서버)와 웹 검색(구글)을 동시에 진행한다
+                with ThreadPoolExecutor(max_workers=1) as ex:
+                    direct = ex.submit(collect_direct, url, clip, [f.getvalue() for f in up_files or []])
+                    if use_web and not local_only:
+                        st.write("공식몰·쇼핑몰·후기를 웹에서 검색하는 중…")
+                        try:
+                            web, wmeta = c_research(cfg, b, pr, url or (clip[0] if clip else ""))
+                            usage.append(("웹 검색", wmeta))
+                            st.write(f"웹 검색 완료 — 참고한 사이트 {len(web.get('sources') or [])}곳")
+                            if url and url in (web.get("url_failed") or []):
+                                notes.append("구글도 링크 본문은 열지 못해서, 검색 결과로 자료를 채웠어요")
+                        except Exception as e:  # noqa: BLE001
+                            if "API_KEY_INVALID" in str(e) or "API key not valid" in str(e):
+                                raise
+                            notes.append("웹 검색을 하지 못했어요 (" + friendly(e)[:60] + ") — 링크·첨부 자료만 썼어요")
+                    if url or clip or up_files:
+                        st.write("상세페이지를 읽는 중…")
+                    page_text, tiles, dnotes = direct.result()
+                    notes += dnotes
+                web_text = (web or {}).get("text", "")
+                if not page_text and not tiles and not manual_text and not web_text:
+                    status.update(label="자료를 모으지 못했어요", state="error")
                     p2["link_failed"] = True
-                    st.error("링크를 읽지 못했어요. 아래 '링크가 안 읽힐 때' 칸의 📋 상세페이지 가져오기 버튼을 쓰거나, 캡처 이미지를 올려주세요.")
-                    if st.button("방법 보기", key="p2_show_help"):
-                        st.rerun()
+                    st.error("자료를 찾지 못했어요. 브랜드명·제품명을 정확히 적었는지 확인하거나, 아래 '자료를 직접 더 넣고 싶을 때'에 캡처를 올려주세요.")
                     st.stop()
-                st.write(f"글자 {len(page_text):,}자, 이미지 조각 {len(tiles)}개 — AI가 읽고 정리하는 중…")
-                material, meta = c_material(cfg, local_only, brand.strip(), product.strip(), page_text, manual_text, tuple(tiles))
+                st.write(f"글자 {len(page_text) + len(manual_text) + len(web_text):,}자, 이미지 조각 {len(tiles)}개 — 제품 사실과 소구점을 정리하는 중…")
+                material, meta = c_material(cfg, local_only, b, pr, page_text, manual_text, tuple(tiles), web_text)
                 usage.append(("자료 정리·소구점", meta))
-                status.update(label="자료 정리 완료", state="complete", expanded=False)
-            ref_bytes = (ref_upload.getvalue(), ref_upload.type) if ref_upload is not None else None
-            p2.update(material=material, brand=brand.strip(), product=product.strip(), notes=notes, copies=None,
-                      ref_upload=ref_bytes, usage=[u for u in p2.get("usage", []) if u[0] == "레퍼런스 구조"] + usage)
+                p2.update(material=material, notes=notes, web=web, usage=usage)
+                if not material["appeals"]:
+                    status.update(label="소구점을 뽑지 못했어요", state="error")
+                else:
+                    status.update(label="소구점 정리 완료 — 카피를 쓰는 중…")
+                    try:
+                        make_copies(cfg, material, local_only)
+                        status.update(label="카피 완성", state="complete", expanded=False)
+                    except Exception as e:  # noqa: BLE001
+                        p2["copy_error"] = friendly(e)
+                        status.update(label="소구점까지 완료 — 카피는 다시 시도해주세요", state="error")
             st.rerun()
         except Exception as e:  # noqa: BLE001
             st.error(friendly(e))
@@ -311,9 +399,16 @@ if run1:
 material = p2.get("material")
 if material:
     gap(48)
-    section("정리된 제품 사실과 소구점", "자료에서 읽은 내용만 근거로 삼았어요")
+    section("정리된 제품 사실과 소구점", "모은 자료에 적힌 내용만 근거로 삼았어요")
     for n in p2.get("notes", []):
         st.caption("ℹ️ " + n)
+    web = p2.get("web") or {}
+    if web.get("text"):
+        with st.expander(f"웹 검색으로 모은 자료 보기 (참고한 사이트 {len(web.get('sources') or [])}곳)"):
+            st.caption("AI가 검색 결과를 정리한 내용이에요. 중요한 수치·성분은 출처 사이트에서 한 번 더 확인하세요.")
+            st.text(web["text"])
+            for s in web.get("sources") or []:
+                st.markdown(f"- [{esc(s['title'] or s['uri'])}]({s['uri']})")
     with st.expander(f"제품 사실 {len(material['facts'])}개 보기"):
         for f in material["facts"]:
             mark = "✓ 인용 확인" if f["verified"] else "⚠ 인용 미확인"
@@ -324,44 +419,27 @@ if material:
     gap(16)
     if not material["appeals"]:
         st.warning("소구점을 뽑지 못했어요. 자료를 더 넣고 다시 시도해주세요.")
-    picked = []
     for a in material["appeals"]:
         with st.container(border=True, key=f"p2_ap_card_{a['id']}"):
-            on = st.checkbox(a["name"], value=True, key=f"p2_ap_{a['id']}")
             cls = "ok" if a["status"] == "확인됨" else "warn"
-            block(f'<span class="pill {cls}">{a["status"]}</span><span style="font-size:15px;color:#444">{esc(a["buying_reason"])}</span>')
+            block(f'<div class="copy-title" style="font-size:19px">{esc(a["name"])}</div>'
+                  f'<span class="pill {cls}">{a["status"]}</span><span style="font-size:15px;color:#444">{esc(a["buying_reason"])}</span>')
             st.caption(f"근거: “{a['quote']}” ({a['source'] or '출처 미확인'})")
             for r in a["reasons"]:
                 block(f'<div class="warn-line">⚠ {esc(r)}</div>')
-        if on:
-            picked.append(a)
-    gap(8)
-    if st.button("선택한 소구로 카피 만들기  →", type="primary", disabled=not picked, key="p2_run2"):
-        cfg = ce.Cfg(api_key=key, local_only=local_only)
-        try:
-            with st.status("카피를 쓰는 중…", expanded=True) as status:
-                usage = list(p2.get("usage", []))
-                ref_struct, ref_text = (p2.get("ref") or {}).get("structure"), (p2.get("ref") or {}).get("reference_text", "")
-                if p2.get("ref_upload"):
-                    st.write("레퍼런스의 구성만 읽는 중…")
-                    rr, rm = c_ref(cfg, local_only, p2["ref_upload"], "")
-                    ref_struct, ref_text = rr["structure"], rr["reference_text"]
-                    usage.append(("레퍼런스 구조", rm))
-                st.write(f"소구 {len(picked)}개 × 카피 5개를 쓰고 검수하는 중…")
-                copies, meta, dropped = c_copies(cfg, local_only, p2["brand"], p2["product"],
-                                                 json.dumps(material["facts"], ensure_ascii=False),
-                                                 json.dumps(picked, ensure_ascii=False),
-                                                 json.dumps(ref_struct or {}, ensure_ascii=False),
-                                                 material["material_text"], ref_text,
-                                                 (ref_in or {}).get("brief", ""))
-                usage.append(("카피 작성", meta))
-                if meta.get("audit"):
-                    usage.append(("AI 검수", meta["audit"]))
-                p2.update(copies=copies, dropped=dropped, usage=usage)
-                status.update(label="카피 완성", state="complete", expanded=False)
-            st.rerun()
-        except Exception as e:  # noqa: BLE001
-            st.error(friendly(e))
+    if p2.get("copy_error") and material["appeals"]:
+        gap(8)
+        st.error("카피를 쓰지 못했어요: " + p2["copy_error"])
+        if st.button("카피만 다시 만들기  →", type="primary", key="p2_run2"):
+            try:
+                with st.status("카피를 쓰는 중…", expanded=True) as status:
+                    lo = bool(st.session_state.get("p2_local"))
+                    make_copies(ce.Cfg(api_key=key, local_only=lo), material, lo)
+                    status.update(label="카피 완성", state="complete", expanded=False)
+                st.rerun()
+            except Exception as e:  # noqa: BLE001
+                p2["copy_error"] = friendly(e)
+                st.error(friendly(e))
 
 copies = p2.get("copies")
 if copies:
