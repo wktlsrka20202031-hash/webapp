@@ -43,9 +43,11 @@ class Cfg:
 
 
 class AllModelsFailed(Exception):
-    def __init__(self, tries):
+    def __init__(self, tries, last_error: str = ""):
         self.tries = tries
-        super().__init__("ALL_MODELS_FAILED: " + ", ".join(f"{m}:{k}" for m, k in tries))
+        self.last_error = last_error
+        super().__init__("ALL_MODELS_FAILED: " + ", ".join(f"{m}:{k}" for m, k in tries)
+                         + (f" | 마지막 오류: {last_error}" if last_error else ""))
 
 
 # 한도에 걸린 모델은 잠시 건너뛴다 (프로세스 안에서 공유)
@@ -189,6 +191,7 @@ def call_json(cfg: Cfg, chain: list[str], instruction: str, parts: list, expect:
     n_img = sum(1 for p in parts if p[0] == "image")
     est_tokens = sum(len(p[1]) for p in parts if p[0] == "text") // 1.5 + n_img * 1100
     tries: list[tuple[str, str]] = []
+    last_error = ""
 
     if not cfg.local_only:
         for _round in range(3):
@@ -208,6 +211,7 @@ def call_json(cfg: Cfg, chain: list[str], instruction: str, parts: list, expect:
                 except Exception as e:  # noqa: BLE001
                     kind = _classify(e)
                     tries.append((m, kind))
+                    last_error = f"{m}: {str(e)[:300]}"
                     if kind == "fatal":
                         raise
                     if kind == "day":
@@ -224,7 +228,7 @@ def call_json(cfg: Cfg, chain: list[str], instruction: str, parts: list, expect:
                 time.sleep(min(max(min(waits), 1), 25))
 
     if tools:  # 이 컴퓨터의 AI는 웹 검색을 못 한다
-        raise AllModelsFailed(tries)
+        raise AllModelsFailed(tries, last_error)
     if cfg.local_only or ollama_available(cfg.ollama_host):
         try:
             data, meta = _ollama_once(cfg, instruction, parts)
@@ -233,7 +237,7 @@ def call_json(cfg: Cfg, chain: list[str], instruction: str, parts: list, expect:
             return data, meta
         except Exception as e:  # noqa: BLE001
             tries.append((OLLAMA_MODEL, "local_fail:" + str(e)[:60]))
-    raise AllModelsFailed(tries)
+    raise AllModelsFailed(tries, last_error)
 
 
 # ------------------------------------------------------------ 글자 정리 ----

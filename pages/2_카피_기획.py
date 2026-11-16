@@ -349,7 +349,7 @@ if run1:
         b, pr, url = brand.strip(), product.strip(), link.strip()
         clip = ce.parse_clip(manual)
         manual_text = "" if clip else manual.strip()
-        p2.update(material=None, copies=None, copy_error=None, web=None, brand=b, product=pr,
+        p2.update(material=None, copies=None, copy_error=None, web=None, web_error=None, brand=b, product=pr,
                   ref_upload=(ref_upload.getvalue(), ref_upload.type) if ref_upload is not None else None)
         try:
             with st.status("자료를 모으는 중…", expanded=True) as status:
@@ -367,15 +367,21 @@ if run1:
                         except Exception as e:  # noqa: BLE001
                             if "API_KEY_INVALID" in str(e) or "API key not valid" in str(e):
                                 raise
-                            notes.append("웹 검색을 하지 못했어요 (" + friendly(e)[:60] + ") — 링크·첨부 자료만 썼어요")
+                            detail = getattr(e, "last_error", "") or str(e)[:300]
+                            notes.append("웹 검색을 하지 못했어요 — 링크·첨부 자료만 썼어요. (" + friendly(e)[:80] + ")")
+                            p2["web_error"] = detail
                     if url or clip or up_files:
                         st.write("상세페이지를 읽는 중…")
                     page_text, tiles, dnotes = direct.result()
                     notes += dnotes
                 web_text = (web or {}).get("text", "")
                 if not page_text and not tiles and not manual_text and not web_text:
-                    status.update(label="자료를 모으지 못했어요", state="error")
+                    status.update(label="자료를 모으지 못했어요", state="error", expanded=True)
                     p2["link_failed"] = True
+                    for n in notes:
+                        st.write("ℹ️ " + n)
+                    if p2.get("web_error"):
+                        st.code("웹 검색 오류: " + p2["web_error"], language=None)
                     st.error("자료를 찾지 못했어요. 브랜드명·제품명을 정확히 적었는지 확인하거나, 아래 '자료를 직접 더 넣고 싶을 때'에 캡처를 올려주세요.")
                     st.stop()
                 st.write(f"글자 {len(page_text) + len(manual_text) + len(web_text):,}자, 이미지 조각 {len(tiles)}개 — 제품 사실과 소구점을 정리하는 중…")
