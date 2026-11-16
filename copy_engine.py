@@ -192,12 +192,14 @@ def call_json(cfg: Cfg, chain: list[str], instruction: str, parts: list, expect:
     est_tokens = sum(len(p[1]) for p in parts if p[0] == "text") // 1.5 + n_img * 1100
     tries: list[tuple[str, str]] = []
     last_error = ""
+    errors: dict[str, str] = {}
 
     if not cfg.local_only:
         for _round in range(3):
             attempted = False
             for m in chain:
-                if _blocked(m):
+                slot = f"{m}+tools" if tools else m  # 웹 검색 한도는 일반 호출과 따로 센다
+                if _blocked(slot):
                     continue
                 if m.startswith("gemma") and est_tokens > 11000:  # Gemma는 분당 토큰 한도가 16K
                     tries.append((m, "too_big"))
@@ -211,17 +213,21 @@ def call_json(cfg: Cfg, chain: list[str], instruction: str, parts: list, expect:
                 except Exception as e:  # noqa: BLE001
                     kind = _classify(e)
                     tries.append((m, kind))
-                    last_error = f"{m}: {str(e)[:300]}"
+                    errors[m] = str(e)[:1200]
+                    last_error = " || ".join(f"{k}: {v}" for k, v in errors.items())
+                    if kind == "minute" and "limit: 0" in str(e):  # 무료 등급에서 아예 안 되는 기능 → 기다려도 소용없다
+                        kind = "day"
                     if kind == "fatal":
                         raise
                     if kind == "day":
-                        _EXHAUSTED[m] = time.time() + 4 * 3600
+                        _EXHAUSTED[slot] = time.time() + 4 * 3600
                     elif kind == "minute":
-                        _COOLDOWN[m] = time.time() + 25
+                        _COOLDOWN[slot] = time.time() + 25
                     elif kind == "busy":
-                        _COOLDOWN[m] = time.time() + 8
-            waits = [_COOLDOWN[m] - time.time() for m in chain
-                     if m in _COOLDOWN and _EXHAUSTED.get(m, 0) <= time.time() and _COOLDOWN[m] > time.time()]
+                        _COOLDOWN[slot] = time.time() + 8
+            slots = [f"{m}+tools" if tools else m for m in chain]
+            waits = [_COOLDOWN[x] - time.time() for x in slots
+                     if x in _COOLDOWN and _EXHAUSTED.get(x, 0) <= time.time() and _COOLDOWN[x] > time.time()]
             if not waits and not attempted:
                 break
             if waits:
