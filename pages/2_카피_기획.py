@@ -182,6 +182,18 @@ def c_fetch(url: str):
     return ce.fetch_page(url)
 
 
+def naver_keys() -> tuple[str, str]:
+    try:
+        return (st.secrets.get("NAVER_CLIENT_ID") or "", st.secrets.get("NAVER_CLIENT_SECRET") or "")
+    except Exception:  # noqa: BLE001
+        return "", ""
+
+
+@st.cache_data(show_spinner=False, ttl=86400, max_entries=60)
+def c_naver(client_id, client_secret, brand, product):
+    return ce.naver_research(client_id, client_secret, brand, product)
+
+
 @st.cache_data(show_spinner=False, ttl=86400, max_entries=60)
 def c_research(_cfg, brand, product, url):
     return ce.web_research(_cfg, brand, product, url)
@@ -357,19 +369,36 @@ if run1:
                 with ThreadPoolExecutor(max_workers=1) as ex:
                     direct = ex.submit(collect_direct, url, clip, [f.getvalue() for f in up_files or []])
                     if use_web and not local_only:
-                        st.write("공식몰·쇼핑몰·후기를 웹에서 검색하는 중…")
+                        texts, sources = [], []
+                        nid, nsec = naver_keys()
+                        if nid:
+                            st.write("네이버쇼핑·블로그·카페에서 검색하는 중…")
+                            try:
+                                nv = c_naver(nid, nsec, b, pr)
+                                if nv["text"]:
+                                    texts.append(nv["text"])
+                                    sources += nv["sources"]
+                                st.write(f"네이버 검색 완료 — 글 {len(nv['sources'])}개")
+                            except Exception as e:  # noqa: BLE001
+                                notes.append("네이버 검색을 하지 못했어요: " + str(e)[:120])
+                        st.write("구글 검색으로 공식몰·후기를 찾는 중…")
                         try:
-                            web, wmeta = c_research(cfg, b, pr, url or (clip[0] if clip else ""))
-                            usage.append(("웹 검색", wmeta))
-                            st.write(f"웹 검색 완료 — 참고한 사이트 {len(web.get('sources') or [])}곳")
-                            if url and url in (web.get("url_failed") or []):
+                            gw, wmeta = c_research(cfg, b, pr, url or (clip[0] if clip else ""))
+                            usage.append(("구글 검색", wmeta))
+                            texts.append(gw["text"])
+                            sources += gw.get("sources") or []
+                            if url and url in (gw.get("url_failed") or []):
                                 notes.append("구글도 링크 본문은 열지 못해서, 검색 결과로 자료를 채웠어요")
                         except Exception as e:  # noqa: BLE001
                             if "API_KEY_INVALID" in str(e) or "API key not valid" in str(e):
                                 raise
-                            detail = getattr(e, "last_error", "") or str(e)[:300]
-                            notes.append("웹 검색을 하지 못했어요 — 링크·첨부 자료만 썼어요. (" + friendly(e)[:80] + ")")
-                            p2["web_error"] = detail
+                            p2["web_error"] = getattr(e, "last_error", "") or str(e)[:300]
+                            if not nid:
+                                notes.append("구글 검색은 지금 Gemini 무료 키로는 쓸 수 없어요(검색 한도 없음). "
+                                             "무료 네이버 검색 API 키를 Secrets에 넣으면 자동 조사가 돼요.")
+                        if texts:
+                            web = {"text": "\n\n".join(texts), "sources": sources, "url_failed": []}
+                            st.write(f"자료 조사 완료 — 참고한 글·사이트 {len(sources)}곳")
                     if url or clip or up_files:
                         st.write("상세페이지를 읽는 중…")
                     page_text, tiles, dnotes = direct.result()
@@ -381,8 +410,12 @@ if run1:
                     for n in notes:
                         st.write("ℹ️ " + n)
                     if p2.get("web_error"):
-                        st.code("웹 검색 오류: " + p2["web_error"], language=None)
-                    st.error("자료를 찾지 못했어요. 브랜드명·제품명을 정확히 적었는지 확인하거나, 아래 '자료를 직접 더 넣고 싶을 때'에 캡처를 올려주세요.")
+                        st.code("구글 검색 오류: " + p2["web_error"], language=None)
+                    if use_web and not naver_keys()[0]:
+                        st.error("자동 조사에 쓸 검색 키가 없어요. 무료 네이버 검색 API 키(NAVER_CLIENT_ID, NAVER_CLIENT_SECRET)를 "
+                                 "Streamlit Secrets에 넣어주세요. 그 전까지는 아래 '자료를 직접 더 넣고 싶을 때'에 캡처나 텍스트를 넣으면 돼요.")
+                    else:
+                        st.error("자료를 찾지 못했어요. 브랜드명·제품명을 정확히 적었는지 확인하거나, 아래 '자료를 직접 더 넣고 싶을 때'에 캡처를 올려주세요.")
                     st.stop()
                 st.write(f"글자 {len(page_text) + len(manual_text) + len(web_text):,}자, 이미지 조각 {len(tiles)}개 — 제품 사실과 소구점을 정리하는 중…")
                 material, meta = c_material(cfg, local_only, b, pr, page_text, manual_text, tuple(tiles), web_text)
@@ -410,7 +443,7 @@ if material:
         st.caption("ℹ️ " + n)
     web = p2.get("web") or {}
     if web.get("text"):
-        with st.expander(f"웹 검색으로 모은 자료 보기 (참고한 사이트 {len(web.get('sources') or [])}곳)"):
+        with st.expander(f"자동 조사로 모은 자료 보기 (참고한 글·사이트 {len(web.get('sources') or [])}곳)"):
             st.caption("AI가 검색 결과를 정리한 내용이에요. 중요한 수치·성분은 출처 사이트에서 한 번 더 확인하세요.")
             st.text(web["text"])
             for s in web.get("sources") or []:

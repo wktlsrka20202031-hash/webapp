@@ -215,8 +215,8 @@ def call_json(cfg: Cfg, chain: list[str], instruction: str, parts: list, expect:
                     tries.append((m, kind))
                     errors[m] = str(e)[:1200]
                     last_error = " || ".join(f"{k}: {v}" for k, v in errors.items())
-                    if kind == "minute" and "limit: 0" in str(e):  # 무료 등급에서 아예 안 되는 기능 → 기다려도 소용없다
-                        kind = "day"
+                    if kind == "minute" and (tools or "limit: 0" in str(e)):
+                        kind = "day"  # 웹 검색 한도·무료 등급에 없는 기능은 기다려도 소용없다
                     if kind == "fatal":
                         raise
                     if kind == "day":
@@ -613,6 +613,60 @@ def web_research(cfg: Cfg, brand: str, product: str, url: str = "") -> tuple[dic
     else:
         ask += "이 제품을 검색해서 조사하세요.\n"
     return call_json(cfg, SEARCH_CHAIN, RESEARCH_SYSTEM, [("text", ask)], tools=tools)
+
+
+_TAG = re.compile(r"<[^>]+>")
+
+
+def _clean(s: str) -> str:
+    import html as _html
+    return _html.unescape(_TAG.sub("", s or "")).strip()
+
+
+def naver_research(client_id: str, client_secret: str, brand: str, product: str) -> dict:
+    """네이버 검색 API(무료, 하루 25,000회)로 네이버쇼핑 상품 정보와 블로그·카페 후기 요약을 모은다.
+    결과: {"text", "sources":[{"title","uri"}], "url_failed":[]}"""
+    query = f"{brand} {product}".strip()
+    headers = {"X-Naver-Client-Id": client_id, "X-Naver-Client-Secret": client_secret}
+
+    def search(kind: str, display: int) -> list[dict]:
+        r = requests.get(f"https://openapi.naver.com/v1/search/{kind}.json", headers=headers,
+                         params={"query": query, "display": display, "sort": "sim"}, timeout=10)
+        if r.status_code in (401, 403):
+            raise ValueError("NAVER_AUTH: 네이버 API 키가 올바르지 않거나 검색 API 사용 설정이 안 되어 있어요")
+        r.raise_for_status()
+        return r.json().get("items") or []
+
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        shop_f, blog_f, cafe_f = ex.submit(search, "shop", 10), ex.submit(search, "blog", 30), ex.submit(search, "cafearticle", 15)
+        shop, blog, cafe = shop_f.result(), blog_f.result(), cafe_f.result()
+
+    lines, sources = [], []
+    if shop:
+        lines.append("[네이버쇼핑 상품 정보]")
+        for it in shop:
+            parts = [_clean(it.get("title"))]
+            for k, label in (("brand", "브랜드"), ("maker", "제조사")):
+                if it.get(k):
+                    parts.append(f"{label} {_clean(it[k])}")
+            if it.get("lprice"):
+                parts.append(f"최저가 {int(it['lprice']):,}원")
+            cat = " > ".join(_clean(it.get(f"category{i}")) for i in range(1, 5) if it.get(f"category{i}"))
+            if cat:
+                parts.append(f"분류 {cat}")
+            lines.append("- " + " | ".join(parts) + f" (출처: 네이버쇼핑 {_clean(it.get('mallName')) or ''})".rstrip())
+            if it.get("link"):
+                sources.append({"title": f"네이버쇼핑 · {_clean(it.get('title'))[:40]}", "uri": it["link"]})
+    for items, head, who in ((blog, "[블로그 사용기·후기 요약]", "bloggername"), (cafe, "[카페 글 요약]", "cafename")):
+        good = [it for it in items if _clean(it.get("description"))]
+        if not good:
+            continue
+        lines.append("\n" + head)
+        for it in good:
+            lines.append(f"- {_clean(it.get('title'))}: {_clean(it.get('description'))} (출처: {_clean(it.get(who)) or '네이버'})")
+            if it.get("link"):
+                sources.append({"title": _clean(it.get("title"))[:50], "uri": it["link"]})
+    return {"text": "\n".join(lines).strip(), "sources": sources[:40], "url_failed": []}
 
 
 # ------------------------------------------------------------------ 단계 ----
