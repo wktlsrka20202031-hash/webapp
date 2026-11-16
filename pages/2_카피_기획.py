@@ -8,6 +8,7 @@ import hmac
 import html
 import json
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import quote_plus
 
 import streamlit as st
 
@@ -305,6 +306,13 @@ with st.container(border=True, key="p2_input_card"):
     run1 = st.button("자료 조사부터 카피까지 한 번에 만들기  →", type="primary", key="p2_run1") or p2.pop("auto_run", False)
     if p2.get("from_clip") and ce.parse_clip(manual):
         st.caption("✓ 📋 북마크로 보내온 상세페이지로 진행해요. 브랜드명이 비어 있으면 자료에서 찾아요.")
+    elif not naver_keys()[0] and product.strip():
+        # 검색 키가 없을 때의 무료 방법: 네이버쇼핑을 열어 상품을 누르고 📋 북마크 한 번
+        gap(8)
+        q = quote_plus(f"{brand.strip()} {product.strip()}".strip())
+        st.link_button("🔎 네이버쇼핑에서 이 제품 찾기 (새 탭)", f"https://search.shopping.naver.com/search/all?query={q}",
+                       width="stretch")
+        st.caption("열린 탭에서 상품을 누르고 → 북마크바의 📋 카피 기획으로 보내기를 누르면, 상세페이지로 카피까지 자동으로 만들어져요.")
 
 def make_copies(cfg, material, local_only) -> None:
     """정리된 자료의 소구점 전부로 카피를 쓰고 검수한다. 결과는 p2에 저장."""
@@ -418,8 +426,8 @@ if run1:
                     if p2.get("web_error"):
                         st.code("구글 검색 오류: " + p2["web_error"], language=None)
                     if use_web and not naver_keys()[0]:
-                        st.error("자동 조사에 쓸 검색 키가 없어요. 네이버 API HUB 검색 키(NAVER_CLIENT_ID, NAVER_CLIENT_SECRET — 하루 25,000회 무료)를 "
-                                 "Streamlit Secrets에 넣어주세요. 그 전까지는 아래 '자료를 직접 더 넣고 싶을 때'에 캡처나 텍스트를 넣으면 돼요.")
+                        st.error("자동 조사에 쓸 네이버 검색 키가 아직 없어요. 지금은 위의 '🔎 네이버쇼핑에서 이 제품 찾기'로 상품을 열고 "
+                                 "📋 북마크를 누르면 카피까지 자동으로 만들어져요.")
                     else:
                         st.error("자료를 찾지 못했어요. 브랜드명·제품명을 정확히 적었는지 확인하거나, 아래 '자료를 직접 더 넣고 싶을 때'에 캡처를 올려주세요.")
                     st.stop()

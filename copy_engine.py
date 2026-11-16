@@ -630,9 +630,24 @@ _NOT_SHOP = re.compile(r"(blog\.|cafe\.|news\.|post\.naver|kin\.naver|tistory\.c
                        r"namu\.wiki|wikipedia|dcinside|fmkorea|theqoo|clien|ppomppu|danawa|enuri)", re.I)
 
 
+# 무료 한도(하루 25,000회)를 절대 넘지 않도록 앱 스스로 하루 호출 수를 제한한다 (한국 날짜 기준)
+NAVER_DAILY_CAP = 3000
+_NAVER_COUNT: dict[str, int] = {}
+
+
+def _naver_take() -> None:
+    day = time.strftime("%Y-%m-%d", time.gmtime(time.time() + 9 * 3600))
+    n = _NAVER_COUNT.get(day, 0)
+    if n >= NAVER_DAILY_CAP:
+        raise ValueError(f"NAVER_CAP: 오늘 네이버 검색을 {NAVER_DAILY_CAP}회 써서 멈췄어요 (무료 한도 보호). 내일 다시 돼요")
+    _NAVER_COUNT.clear()
+    _NAVER_COUNT[day] = n + 1
+
+
 def naver_search(client_id: str, client_secret: str, kind: str, query: str, display: int) -> list[dict]:
     """NAVER API HUB(네이버클라우드) 검색. 예전 개발자센터 키도 받아 준다.
     kind: blog / cafearticle / webkr / news / shop"""
+    _naver_take()
     params = {"query": query, "display": display, "start": 1, "sort": "sim"}
     tries = [(f"{NAVER_HUB}/{kind}", {"X-NCP-APIGW-API-KEY-ID": client_id, "X-NCP-APIGW-API-KEY": client_secret},
               dict(params, format="json")),
