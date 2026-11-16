@@ -366,19 +366,21 @@ if run1:
         try:
             with st.status("자료를 모으는 중…", expanded=True) as status:
                 # 링크 읽기(이 서버)와 웹 검색(구글)을 동시에 진행한다
+                found: dict = {}
                 with ThreadPoolExecutor(max_workers=1) as ex:
                     direct = ex.submit(collect_direct, url, clip, [f.getvalue() for f in up_files or []])
                     if use_web and not local_only:
                         texts, sources = [], []
                         nid, nsec = naver_keys()
                         if nid:
-                            st.write("네이버쇼핑·블로그·카페에서 검색하는 중…")
+                            st.write("네이버에서 상품 페이지·블로그·카페를 찾는 중…")
                             try:
                                 nv = c_naver(nid, nsec, b, pr)
                                 if nv["text"]:
                                     texts.append(nv["text"])
                                     sources += nv["sources"]
-                                st.write(f"네이버 검색 완료 — 글 {len(nv['sources'])}개")
+                                found = nv
+                                st.write(f"네이버 검색 완료 — 상품 페이지 {len(nv.get('pages') or [])}곳 읽음, 후기·글 {len(nv['sources'])}개")
                             except Exception as e:  # noqa: BLE001
                                 notes.append("네이버 검색을 하지 못했어요: " + str(e)[:120])
                         st.write("구글 검색으로 공식몰·후기를 찾는 중…")
@@ -395,7 +397,7 @@ if run1:
                             p2["web_error"] = getattr(e, "last_error", "") or str(e)[:300]
                             if not nid:
                                 notes.append("구글 검색은 지금 Gemini 무료 키로는 쓸 수 없어요(검색 한도 없음). "
-                                             "무료 네이버 검색 API 키를 Secrets에 넣으면 자동 조사가 돼요.")
+                                             "네이버 API HUB 검색 키를 Secrets에 넣으면 자동 조사가 돼요.")
                         if texts:
                             web = {"text": "\n\n".join(texts), "sources": sources, "url_failed": []}
                             st.write(f"자료 조사 완료 — 참고한 글·사이트 {len(sources)}곳")
@@ -403,6 +405,10 @@ if run1:
                         st.write("상세페이지를 읽는 중…")
                     page_text, tiles, dnotes = direct.result()
                     notes += dnotes
+                    if found.get("page_text"):  # 검색으로 찾아 읽은 공식몰·브랜드몰 상품 페이지
+                        page_text = (page_text + "\n\n" + found["page_text"]).strip()
+                        tiles = (tiles + list(found.get("images") or []))[:ce.MAX_TILES]
+                        notes.append("검색으로 찾은 상품 페이지를 자동으로 읽었어요: " + ", ".join(found.get("pages") or []))
                 web_text = (web or {}).get("text", "")
                 if not page_text and not tiles and not manual_text and not web_text:
                     status.update(label="자료를 모으지 못했어요", state="error", expanded=True)
@@ -412,7 +418,7 @@ if run1:
                     if p2.get("web_error"):
                         st.code("구글 검색 오류: " + p2["web_error"], language=None)
                     if use_web and not naver_keys()[0]:
-                        st.error("자동 조사에 쓸 검색 키가 없어요. 무료 네이버 검색 API 키(NAVER_CLIENT_ID, NAVER_CLIENT_SECRET)를 "
+                        st.error("자동 조사에 쓸 검색 키가 없어요. 네이버 API HUB 검색 키(NAVER_CLIENT_ID, NAVER_CLIENT_SECRET — 하루 25,000회 무료)를 "
                                  "Streamlit Secrets에 넣어주세요. 그 전까지는 아래 '자료를 직접 더 넣고 싶을 때'에 캡처나 텍스트를 넣으면 돼요.")
                     else:
                         st.error("자료를 찾지 못했어요. 브랜드명·제품명을 정확히 적었는지 확인하거나, 아래 '자료를 직접 더 넣고 싶을 때'에 캡처를 올려주세요.")

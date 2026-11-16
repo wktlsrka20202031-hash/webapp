@@ -623,50 +623,105 @@ def _clean(s: str) -> str:
     return _html.unescape(_TAG.sub("", s or "")).strip()
 
 
-def naver_research(client_id: str, client_secret: str, brand: str, product: str) -> dict:
-    """네이버 검색 API(무료, 하루 25,000회)로 네이버쇼핑 상품 정보와 블로그·카페 후기 요약을 모은다.
-    결과: {"text", "sources":[{"title","uri"}], "url_failed":[]}"""
-    query = f"{brand} {product}".strip()
-    headers = {"X-Naver-Client-Id": client_id, "X-Naver-Client-Secret": client_secret}
+NAVER_HUB = "https://naverapihub.apigw.ntruss.com/search/v1"
+NAVER_OLD = "https://openapi.naver.com/v1/search"
+# 검색 결과에서 상품 페이지로 읽지 않을 곳 (후기·뉴스·포털·막아 둔 쇼핑몰은 따로 다룬다)
+_NOT_SHOP = re.compile(r"(blog\.|cafe\.|news\.|post\.naver|kin\.naver|tistory\.com|youtube\.|instagram\.|facebook\.|"
+                       r"namu\.wiki|wikipedia|dcinside|fmkorea|theqoo|clien|ppomppu|danawa|enuri)", re.I)
 
-    def search(kind: str, display: int) -> list[dict]:
-        r = requests.get(f"https://openapi.naver.com/v1/search/{kind}.json", headers=headers,
-                         params={"query": query, "display": display, "sort": "sim"}, timeout=10)
+
+def naver_search(client_id: str, client_secret: str, kind: str, query: str, display: int) -> list[dict]:
+    """NAVER API HUB(네이버클라우드) 검색. 예전 개발자센터 키도 받아 준다.
+    kind: blog / cafearticle / webkr / news / shop"""
+    params = {"query": query, "display": display, "start": 1, "sort": "sim"}
+    tries = [(f"{NAVER_HUB}/{kind}", {"X-NCP-APIGW-API-KEY-ID": client_id, "X-NCP-APIGW-API-KEY": client_secret},
+              dict(params, format="json")),
+             (f"{NAVER_OLD}/{kind}.json", {"X-Naver-Client-Id": client_id, "X-Naver-Client-Secret": client_secret}, params)]
+    auth_failed = False
+    for url, headers, p in tries:
+        try:
+            r = requests.get(url, headers=headers, params=p, timeout=10)
+        except requests.RequestException:
+            continue
         if r.status_code in (401, 403):
-            raise ValueError("NAVER_AUTH: 네이버 API 키가 올바르지 않거나 검색 API 사용 설정이 안 되어 있어요")
+            auth_failed = True
+            continue
+        if r.status_code == 404:  # 이 검색 종류가 없거나 종료됨
+            continue
         r.raise_for_status()
         return r.json().get("items") or []
+    if auth_failed:
+        raise ValueError("NAVER_AUTH: 네이버 API 키가 올바르지 않거나, API HUB에서 검색 API 사용 신청이 안 되어 있어요")
+    return []
 
-    with ThreadPoolExecutor(max_workers=3) as ex:
-        shop_f, blog_f, cafe_f = ex.submit(search, "shop", 10), ex.submit(search, "blog", 30), ex.submit(search, "cafearticle", 15)
-        shop, blog, cafe = shop_f.result(), blog_f.result(), cafe_f.result()
+
+def _pick_shop_pages(items: list[dict], limit: int = 2) -> list[str]:
+    out = []
+    for it in items:
+        link = str(it.get("link") or "")
+        if not link.startswith("http") or _NOT_SHOP.search(link) or _site_name(link):
+            continue
+        if link not in out:
+            out.append(link)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def naver_research(client_id: str, client_secret: str, brand: str, product: str) -> dict:
+    """브랜드·제품명만으로 자료를 모은다.
+    1) 네이버 웹문서 검색으로 공식몰·브랜드몰 상품 페이지를 찾아 직접 읽는다 (막아 둔 쇼핑몰은 건너뜀)
+    2) 블로그·카페 검색으로 후기 요약을 모은다
+    결과: {"text", "sources":[{"title","uri"}], "url_failed":[], "page_text", "images", "pages"}"""
+    query = f"{brand} {product}".strip()
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futs = {k: ex.submit(naver_search, client_id, client_secret, k, query, n)
+                for k, n in (("webkr", 15), ("blog", 30), ("cafearticle", 15), ("shop", 10))}
+        res = {}
+        for k, f in futs.items():
+            try:
+                res[k] = f.result()
+            except ValueError:
+                raise
+            except Exception:  # noqa: BLE001
+                res[k] = []
 
     lines, sources = [], []
-    if shop:
-        lines.append("[네이버쇼핑 상품 정보]")
-        for it in shop:
+    # 상품 페이지 자동으로 찾아 읽기 (웹문서 → 쇼핑 결과 순)
+    page_text, images, pages = "", [], []
+    for link in _pick_shop_pages(res["webkr"] + res["shop"]):
+        pg = fetch_page(link, max_tiles=MAX_TILES // 2)
+        if pg.ok and (len(pg.text) > 300 or pg.images):
+            pages.append(link)
+            page_text += f"\n\n[자동으로 찾은 상품 페이지: {link}]\n{pg.text[:9000]}"
+            images += list(pg.images)
+            sources.append({"title": "상품 페이지 (자동으로 찾음)", "uri": link})
+        if len(images) >= MAX_TILES:
+            break
+
+    if res["shop"]:
+        lines.append("[쇼핑 검색 상품 정보]")
+        for it in res["shop"]:
             parts = [_clean(it.get("title"))]
             for k, label in (("brand", "브랜드"), ("maker", "제조사")):
                 if it.get(k):
                     parts.append(f"{label} {_clean(it[k])}")
-            if it.get("lprice"):
+            if str(it.get("lprice") or "").isdigit():
                 parts.append(f"최저가 {int(it['lprice']):,}원")
-            cat = " > ".join(_clean(it.get(f"category{i}")) for i in range(1, 5) if it.get(f"category{i}"))
-            if cat:
-                parts.append(f"분류 {cat}")
-            lines.append("- " + " | ".join(parts) + f" (출처: 네이버쇼핑 {_clean(it.get('mallName')) or ''})".rstrip())
-            if it.get("link"):
-                sources.append({"title": f"네이버쇼핑 · {_clean(it.get('title'))[:40]}", "uri": it["link"]})
-    for items, head, who in ((blog, "[블로그 사용기·후기 요약]", "bloggername"), (cafe, "[카페 글 요약]", "cafename")):
-        good = [it for it in items if _clean(it.get("description"))]
+            lines.append("- " + " | ".join(parts) + f" (출처: {_clean(it.get('mallName')) or '네이버쇼핑'})")
+    for key, head, who in (("webkr", "[웹문서 검색 요약]", None), ("blog", "[블로그 사용기·후기 요약]", "bloggername"),
+                           ("cafearticle", "[카페 글 요약]", "cafename")):
+        good = [it for it in res[key] if _clean(it.get("description"))]
         if not good:
             continue
         lines.append("\n" + head)
         for it in good:
-            lines.append(f"- {_clean(it.get('title'))}: {_clean(it.get('description'))} (출처: {_clean(it.get(who)) or '네이버'})")
+            src = _clean(it.get(who)) if who else (urlparse(str(it.get("link") or "")).hostname or "웹문서")
+            lines.append(f"- {_clean(it.get('title'))}: {_clean(it.get('description'))} (출처: {src or '네이버'})")
             if it.get("link"):
                 sources.append({"title": _clean(it.get("title"))[:50], "uri": it["link"]})
-    return {"text": "\n".join(lines).strip(), "sources": sources[:40], "url_failed": []}
+    return {"text": "\n".join(lines).strip(), "sources": sources[:45], "url_failed": [],
+            "page_text": page_text.strip(), "images": images[:MAX_TILES], "pages": pages}
 
 
 # ------------------------------------------------------------------ 단계 ----
